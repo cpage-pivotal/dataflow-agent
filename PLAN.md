@@ -64,14 +64,16 @@ graph TB
     subgraph GitHub [GitHub]
         Repo[tanzu-dataflow Repo]
         Actions[GitHub Actions Workflow]
-        Releases[GitHub Releases - JAR artifacts]
+        Releases["GitHub Releases (custom app JARs)"]
     end
 
+    MavenCentral["Maven Central (upstream app JARs)"]
+
     subgraph Pipeline [Deployed RAG Pipeline]
-        Source[S3 Source App]
-        Processor[Text Extractor Processor]
-        Sink[PgVector Sink App]
-        CredHubSI_S3[CredHub SI: aws-creds]
+        Source["S3 Source (upstream)"]
+        Processor["Text Extractor (custom)"]
+        Sink["PgVector Sink (custom)"]
+        CredHubSI_S3[CredHub SI: s3-creds]
         CredHubSI_PG[CredHub SI: pgvector-creds]
         CredHubSI_EMB[CredHub SI: embedding-creds]
     end
@@ -93,7 +95,8 @@ graph TB
     GH_MCP -->|GitHub API| Repo
     Repo --> Actions
     Actions -->|built JAR| Releases
-    Releases -->|HTTP URL| SCDF_MCP
+    Releases -->|"custom app URIs"| SCDF_MCP
+    MavenCentral -->|"bulk_register_apps"| SCDF_MCP
 
     CredHubSI_S3 -.->|VCAP_SERVICES| Source
     CredHubSI_PG -.->|VCAP_SERVICES| Sink
@@ -113,7 +116,7 @@ graph TB
 4. **Agent** asks the user for any missing credentials, guided by `references/credhub-patterns.md` which specifies what each component requires
 5. **Agent spawns `credential-provisioner` subagent** which uses the **Cloud Foundry MCP server** to create CredHub service instances for each component that needs secrets (`cf create-service credhub default ...`)
 6. If custom apps are needed: **Agent spawns `custom-app-builder` subagent** which generates Spring Cloud Stream code (using the coding model, guided by `references/custom-app-scaffold.md`), commits it via the **GitHub MCP server**, triggers a GitHub Actions build, polls for completion, and returns the artifact URL
-7. **Agent** registers all apps (pre-built and custom) with SCDF via the **SCDF MCP server** (`register_app`)
+7. **Agent** ensures upstream apps are registered via `bulk_register_apps` (idempotent -- safe to call if already done), then registers any custom RAG apps via `register_app`
 8. **Agent** creates the stream definition via the **SCDF MCP server** (`create_stream`)
 9. **Agent** deploys the stream with CredHub service bindings and deployer properties via the **SCDF MCP server** (`deploy_stream`), guided by `references/scdf-deployment.md`
 10. **Agent** checks deployment status via the **SCDF MCP server** (`get_stream_status`) and reports back to the user
@@ -127,11 +130,11 @@ This project lives entirely in the `tanzu-dataflow` repo and produces:
 
 1. **An SCDF MCP Server** (Spring Boot, Streamable HTTP) deployed to Cloud Foundry -- a focused, thin REST client that calls the SCDF REST API directly (authenticated via OAuth2 client credentials from the p-dataflow service binding) and exposes SCDF operations as MCP tools. This is the **only custom MCP server** we build. CredHub provisioning uses the existing CF MCP server; GitHub operations use the community GitHub MCP server.
 
-2. **Pre-built configurable stream apps** as Maven submodules, published to GitHub Releases, covering common RAG pipeline components (S3 source, text extractor, chunker, embedding processor, PgVector sink)
+2. **Pre-built stream app integration** via the [Spring Cloud Stream Applications](https://github.com/spring-cloud/stream-applications) project (v2025.0.1). The full upstream catalog (~50 apps including S3, HTTP, JDBC, FTP, SFTP, MongoDB, TCP, etc.) is registered with SCDF via bulk import from Maven Central -- no need to build or maintain these. **Custom RAG-specific apps** (text extractor, chunker, embedding processor, PgVector sink) are built as Maven submodules in `stream-apps/` and published to GitHub Releases, since they do not exist upstream
 
 3. **A Goose Skill** (`rag-pipeline-builder`) -- the orchestration brain of the system. It contains the workflow logic, decision trees, credential gathering patterns, and reference material that guide the agent through the entire pipeline lifecycle. Custom app code generation is performed by the agent's coding model, guided by skill reference documents (not rigid templates).
 
-4. **GitHub Actions workflows** for building pre-built stream apps (CI) and custom apps (triggered by the agent via the GitHub MCP server)
+4. **GitHub Actions workflows** for building custom RAG stream apps (CI) and agent-generated custom apps (triggered via the GitHub MCP server)
 
 ---
 
@@ -157,14 +160,8 @@ tanzu-dataflow/
 │           ├── StreamStatus.java        # Record: stream name, status, description, app statuses
 │           └── AppInstanceStatus.java   # Record: instance id, state, attributes
 │
-├── stream-apps/                         # Pre-built configurable stream apps
+├── stream-apps/                         # Custom RAG-specific stream apps (not available upstream)
 │   ├── pom.xml                          # Parent for stream app submodules
-│   ├── s3-source/                       # Polls S3 bucket for new files
-│   │   ├── pom.xml
-│   │   └── src/main/java/.../S3SourceApplication.java
-│   ├── http-source/                     # Receives files via HTTP POST webhook
-│   │   ├── pom.xml
-│   │   └── src/main/java/.../HttpSourceApplication.java
 │   ├── text-extractor-processor/        # Extracts text from PDF, DOCX, TXT
 │   │   ├── pom.xml
 │   │   └── src/main/java/.../TextExtractorApplication.java
@@ -174,7 +171,7 @@ tanzu-dataflow/
 │   ├── embedding-processor/             # Calls embedding API (OpenAI, etc.)
 │   │   ├── pom.xml
 │   │   └── src/main/java/.../EmbeddingProcessorApplication.java
-│   └── pgvector-sink/                   # Writes embeddings to PgVector
+│   └── pgvector-sink/                   # Writes embeddings to PgVector via Spring AI VectorStore
 │       ├── pom.xml
 │       └── src/main/java/.../PgVectorSinkApplication.java
 │
@@ -203,7 +200,7 @@ The `rag-pipeline-builder` skill is the **orchestration brain** of the system. F
 The main `SKILL.md` file (~500 lines) contains:
 
 1. **Intent recognition** -- How to parse natural language pipeline descriptions and identify required components
-2. **Component selection logic** -- Decision tree for choosing pre-built apps vs. generating custom code
+2. **Component selection logic** -- Decision tree: upstream catalog app vs. custom RAG app vs. agent-generated custom code
 3. **Credential gathering workflow** -- What to ask the user, in what order, with clear security guidance
 4. **Orchestration steps** -- The ordered sequence of MCP calls across three servers (CF, GitHub, SCDF), including when to spawn subagents
 5. **Error handling** -- What to do when builds fail, deployments fail, or credentials are invalid
@@ -215,7 +212,7 @@ Detailed reference material is loaded on demand (not at skill activation), keepi
 
 | Reference File | Purpose | When Loaded |
 |---|---|---|
-| `prebuilt-apps.md` | Complete catalog of pre-built apps: function models, stream properties, CredHub credential requirements | During component identification |
+| `prebuilt-apps.md` | Complete catalog: upstream Spring Cloud Stream Applications (S3, HTTP, JDBC, etc.) with config property mappings for CredHub, plus custom RAG apps (text-extractor, chunker, embedding, pgvector-sink) | During component identification |
 | `custom-app-scaffold.md` | Spring Cloud Stream function model patterns, Maven POM structure, RabbitMQ binder configuration, example source/processor/sink code | When custom app generation is needed |
 | `credhub-patterns.md` | CredHub service instance naming conventions, `VCAP_SERVICES` JSON structure, credential resolution patterns in Spring Boot | During credential provisioning |
 | `scdf-deployment.md` | SCDF deployer property syntax, CF-specific properties (services, memory, instances), stream definition DSL syntax | During pipeline deployment |
@@ -264,8 +261,9 @@ Key dependencies in `scdf-mcp-server/pom.xml`:
 | Tool | Description | Parameters | Returns |
 |------|------------|------------|---------|
 | `register_app` | Register a stream app with SCDF by name, type, and artifact URI | `name`, `type` (source/processor/sink), `uri` (HTTP URL or Maven coords) | `StreamAppInfo` |
+| `bulk_register_apps` | Import the upstream Spring Cloud Stream Applications catalog (2025.0.1) from Maven Central, registering all ~50 apps (sources, processors, sinks) with SCDF in one call. This is metadata-only -- no JARs are downloaded until a stream is deployed. | none | Summary with count of registered apps |
 | `list_registered_apps` | List apps currently registered with SCDF, optionally filtered by type | `type` (optional filter) | `List<StreamAppInfo>` |
-| `create_stream` | Create a stream definition using SCDF DSL syntax | `name`, `definition` (DSL string, e.g. `s3-source \| text-extractor \| pgvector-sink`), `description` (optional) | `StreamStatus` |
+| `create_stream` | Create a stream definition using SCDF DSL syntax | `name`, `definition` (DSL string, e.g. `s3 \| text-extractor \| pgvector-sink`), `description` (optional) | `StreamStatus` |
 | `deploy_stream` | Deploy a stream with deployer properties (service bindings, memory, instances) | `name`, `properties` (JSON object of deployer properties) | `StreamStatus` |
 | `undeploy_stream` | Undeploy a running stream (stops apps but preserves the definition) | `name` | success message |
 | `destroy_stream` | Destroy a stream definition (must be undeployed first) | `name` | success message |
@@ -297,9 +295,18 @@ public class ScdfTools {
         return scdfService.registerApp(name, type, uri);
     }
 
+    @McpTool(name = "bulk_register_apps", description = """
+            Import the full Spring Cloud Stream Applications catalog (2025.0.1) from Maven Central, \
+            registering all ~50 upstream apps (S3, HTTP, JDBC, FTP, SFTP, MongoDB, TCP, etc.) with SCDF. \
+            This is metadata-only -- no JARs are downloaded until a stream is deployed. \
+            Call this once to make all standard sources, processors, and sinks available.""")
+    public String bulkRegisterApps() {
+        return scdfService.bulkRegisterApps();
+    }
+
     @McpTool(name = "create_stream", description = """
             Create a stream definition using SCDF DSL syntax. \
-            Example definition: 's3-source | text-extractor | pgvector-sink'. \
+            Example definition: 's3 | text-extractor | pgvector-sink'. \
             This creates the definition only; use deploy_stream to deploy it.""")
     public StreamStatus createStream(
             @McpToolParam(description = "Stream name (must be unique)") String name,
@@ -377,13 +384,47 @@ RestClient scdfRestClient(
 `ScdfService` calls the SCDF REST API directly and parses HAL+JSON responses:
 
 ```java
-// ScdfService.java -- register a pre-built app via POST /apps/{type}/{name}
+// ScdfService.java -- register a single app via POST /apps/{type}/{name}
 restClient.post()
         .uri("/apps/{type}/{name}", type, name)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body("uri=" + encodeValue(uri) + "&force=true")
         .retrieve()
         .toBodilessEntity();
+
+// Bulk-register the upstream Spring Cloud Stream Applications catalog (2025.0.1).
+// Fetches the RabbitMQ descriptor from Maven Central and parses it as a properties file.
+// Each line is "{type}.{name}=https://repo.maven.apache.org/.../{name}-rabbit-5.1.1.jar".
+// This is metadata-only -- SCDF stores the URI; no JARs are downloaded until deployment.
+private static final String UPSTREAM_DESCRIPTOR_URL =
+        "https://repo.maven.apache.org/maven2/org/springframework/cloud/stream/app/" +
+        "stream-applications-descriptor/2025.0.1/" +
+        "stream-applications-descriptor-2025.0.1.rabbit-apps-maven-repo-url.properties";
+
+public String bulkRegisterApps() {
+    String descriptor = RestClient.create().get()
+            .uri(UPSTREAM_DESCRIPTOR_URL)
+            .retrieve()
+            .body(String.class);
+
+    int count = 0;
+    for (String line : descriptor.lines().toList()) {
+        if (line.isBlank() || line.startsWith("#")) continue;
+        // Lines like: source.s3=https://repo.maven.apache.org/.../s3-source-rabbit-5.1.1.jar
+        // Skip metadata/bootVersion lines (e.g. source.s3.metadata=..., source.s3.bootVersion=3)
+        String[] parts = line.split("=", 2);
+        if (parts.length != 2) continue;
+        String[] keyParts = parts[0].split("\\.", 2);
+        if (keyParts.length != 2 || keyParts[1].contains(".")) continue;
+
+        String type = keyParts[0];   // source, processor, sink
+        String name = keyParts[1];   // s3, http, jdbc, ...
+        String uri = parts[1].trim();
+        registerApp(name, type, uri);
+        count++;
+    }
+    return "Registered %d upstream Spring Cloud Stream Applications (2025.0.1) with SCDF.".formatted(count);
+}
 
 // Create a stream definition via POST /streams/definitions
 restClient.post()
@@ -459,7 +500,7 @@ No custom GitHub integration code is needed. Register the GitHub MCP server in g
 2. Verifies each service instance was created successfully
 3. Returns the list of service instance names to the parent agent
 
-**Returns**: Map of app names to CredHub service instance names (e.g., `{"s3-source": "legal-docs-rag-s3-source-creds", ...}`).
+**Returns**: Map of app names to CredHub service instance names (e.g., `{"s3": "legal-docs-rag-s3-creds", "embedding": "legal-docs-rag-embedding-creds", ...}`).
 
 **Why a subagent**: Credential provisioning involves multiple sequential CF CLI calls that produce verbose output. Isolating this keeps the main conversation focused on pipeline design. The subagent can also handle retries if service creation is slow.
 
@@ -467,7 +508,7 @@ No custom GitHub integration code is needed. Register the GitHub MCP server in g
 
 ### custom-app-builder Subagent
 
-**Trigger**: Agent spawns this subagent when a pipeline component requires custom code not available in the pre-built library.
+**Trigger**: Agent spawns this subagent when a pipeline component requires custom code not available in either the upstream Spring Cloud Stream Applications catalog or the custom RAG apps in `stream-apps/`.
 
 **Receives**: App name, type (source/processor/sink), natural language description of the required logic, and any specific dependencies.
 
@@ -534,10 +575,10 @@ Sensitive credentials required by pipeline components (AWS keys, database passwo
 1. **Agent collects credentials** from the user (e.g., AWS access key, PgVector password)
 2. **Agent spawns `credential-provisioner` subagent** which uses the existing **Cloud Foundry MCP server** to:
    - Create a CredHub service instance per pipeline component: `cf create-service credhub default {pipeline}-{app}-creds -c '{"key":"value",...}'`
-   - Example: `cf create-service credhub default legal-docs-rag-s3-source-creds -c '{"AWS_ACCESS_KEY_ID":"AKIA...","AWS_SECRET_ACCESS_KEY":"..."}'`
+   - Example: `cf create-service credhub default legal-docs-rag-s3-creds -c '{"spring.cloud.aws.credentials.access-key":"AKIA...","spring.cloud.aws.credentials.secret-key":"..."}'`
 3. **During stream deployment**, the agent includes SCDF deployer properties that bind the CredHub service instances to the corresponding apps:
    ```
-   deployer.s3-source.cloudfoundry.services=legal-docs-rag-s3-source-creds
+   deployer.s3.cloudfoundry.services=legal-docs-rag-s3-creds
    deployer.pgvector-sink.cloudfoundry.services=legal-docs-rag-pgvector-sink-creds
    deployer.embedding.cloudfoundry.services=legal-docs-rag-embedding-creds
    ```
@@ -550,24 +591,31 @@ Sensitive credentials required by pipeline components (AWS keys, database passwo
 ```
 
 Examples:
-- `legal-docs-rag-s3-source-creds` -- AWS credentials for the S3 source
-- `legal-docs-rag-embedding-creds` -- OpenAI API key for the embedding processor
-- `legal-docs-rag-pgvector-sink-creds` -- PgVector connection credentials
+- `legal-docs-rag-s3-creds` -- AWS credentials for the upstream S3 source
+- `legal-docs-rag-embedding-creds` -- OpenAI API key for the custom embedding processor
+- `legal-docs-rag-pgvector-sink-creds` -- PgVector connection credentials for the custom PgVector sink
 
 ### Stream App Credential Resolution
 
-Each pre-built stream app reads credentials from `VCAP_SERVICES` at startup:
+**Upstream apps** use standard Spring Boot externalized configuration. When a CredHub service instance is bound to a CF app, Spring Boot flattens the credentials from `VCAP_SERVICES` into properties. If the CredHub keys match the upstream app's expected property names, no bridging code is needed:
+
+```json
+// CredHub service instance "legal-docs-rag-s3-creds" with keys matching Spring Cloud AWS properties:
+{
+  "spring.cloud.aws.credentials.access-key": "AKIA...",
+  "spring.cloud.aws.credentials.secret-key": "...",
+  "spring.cloud.aws.region.static": "us-west-2"
+}
+// Spring Boot flattens these from VCAP_SERVICES, and the upstream S3 source reads them natively.
+```
+
+**Custom RAG apps** follow the same pattern -- CredHub keys are named to match the app's `@Value` or `@ConfigurationProperties` bindings:
 
 ```java
-// In each stream app's configuration
-@Bean
-public S3CredentialsProvider s3Credentials(
-        @Value("${vcap.services.*.credentials.AWS_ACCESS_KEY_ID:}") String accessKey,
-        @Value("${vcap.services.*.credentials.AWS_SECRET_ACCESS_KEY:}") String secretKey) {
-    // Spring Boot automatically flattens VCAP_SERVICES into properties
-    return StaticCredentialsProvider.create(
-        AwsBasicCredentials.create(accessKey, secretKey));
-}
+// In the custom pgvector-sink's configuration
+@ConfigurationProperties(prefix = "pgvector")
+public record PgVectorProperties(String url, String username, String password, ...) {}
+// CredHub keys: "pgvector.url", "pgvector.username", "pgvector.password"
 ```
 
 ### Credential Lifecycle
@@ -585,38 +633,87 @@ public S3CredentialsProvider s3Credentials(
 
 ---
 
-## Pre-built Stream App Specifications
+## Stream App Strategy
+
+This project uses a **hybrid approach** to stream apps:
+
+1. **Upstream apps** from the [Spring Cloud Stream Applications](https://github.com/spring-cloud/stream-applications) project (v2025.0.1) -- a catalog of ~50 production-ready, configurable source/processor/sink apps published to Maven Central. These are registered with SCDF via `bulk_register_apps` and used directly. We do not build, fork, or wrap them.
+
+2. **Custom RAG-specific apps** built in `stream-apps/` -- components that do not exist in the upstream catalog (text extraction, chunking, embedding, PgVector vector-store writes). These are published to GitHub Releases.
+
+### Why Not Build Our Own S3 Source / HTTP Source?
+
+The upstream apps are battle-tested, well-documented, and actively maintained by the Spring Cloud team. They support Spring Boot 3.4.x, Spring Cloud Stream 4.x, and the RabbitMQ binder. Their configuration properties are externalized via standard Spring Boot mechanisms, which means CredHub credentials injected via `VCAP_SERVICES` work out of the box -- no wrapper code needed.
+
+### Why Not Use the Upstream JDBC Sink for PgVector?
+
+The upstream `jdbc-sink` uses Spring's `SimpleJdbcInsert` with a column-mapping DSL (`jdbc.consumer.columns=name:payload.name`). PostgreSQL's `vector` type requires either the `pgvector-java` library with `PGvector.registerTypes()` or explicit `::vector` SQL casting -- neither of which the upstream JDBC sink supports. More importantly, our PgVector sink uses Spring AI's `VectorStore` abstraction, which manages document metadata, auto-creates the schema with appropriate indexes (HNSW/IVFFlat), and handles the vector type binding correctly. This is fundamentally different from a generic relational INSERT.
+
+---
+
+## Upstream Spring Cloud Stream Applications (v2025.0.1)
+
+Registered with SCDF via the `bulk_register_apps` MCP tool. The full catalog is available at the [stream-applications repository](https://github.com/spring-cloud/stream-applications). Key apps relevant to RAG and data integration pipelines:
+
+| Type | Name | Description | Upstream Artifact |
+|------|------|-------------|-------------------|
+| source | `s3` | Polls AWS S3 bucket, transfers files to local, emits content | `s3-source-rabbit:5.1.1` |
+| source | `http` | Receives HTTP POST payloads and emits as messages | `http-source-rabbit:5.1.1` |
+| source | `jdbc` | Polls a database table and emits rows as messages | `jdbc-source-rabbit:5.1.1` |
+| source | `file` | Monitors a local directory for new files | `file-source-rabbit:5.1.1` |
+| source | `ftp` / `sftp` | Monitors FTP/SFTP servers for new files | `ftp-source-rabbit:5.1.1` |
+| source | `mongodb` | Polls a MongoDB collection | `mongodb-source-rabbit:5.1.1` |
+| source | `mqtt` | Subscribes to an MQTT topic | `mqtt-source-rabbit:5.1.1` |
+| source | `mail` | Polls an email inbox (IMAP) | `mail-source-rabbit:5.1.1` |
+| processor | `transform` | Applies SpEL expressions to transform payloads | `transform-processor-rabbit:5.1.1` |
+| processor | `filter` | Filters messages based on SpEL expressions | `filter-processor-rabbit:5.1.1` |
+| processor | `splitter` | Splits a single message into multiple messages | `splitter-processor-rabbit:5.1.1` |
+| processor | `groovy` | Applies Groovy scripts to messages | `groovy-processor-rabbit:5.1.1` |
+| processor | `http-request` | Makes HTTP requests and emits responses | `http-request-processor-rabbit:5.1.1` |
+| processor | `script` | Executes scripts (JavaScript, Ruby, Python, Groovy) | `script-processor-rabbit:5.1.1` |
+| sink | `jdbc` | Inserts payloads into a relational database table | `jdbc-sink-rabbit:5.1.1` |
+| sink | `log` | Logs message payloads (useful for debugging pipelines) | `log-sink-rabbit:5.1.1` |
+| sink | `mongodb` | Writes to a MongoDB collection | `mongodb-sink-rabbit:5.1.1` |
+| sink | `s3` | Writes to an AWS S3 bucket | `s3-sink-rabbit:5.1.1` |
+| sink | `elasticsearch` | Writes to Elasticsearch | `elasticsearch-sink-rabbit:5.1.1` |
+| sink | `file` | Writes to local files | `file-sink-rabbit:5.1.1` |
+
+All upstream apps are available as JARs from Maven Central at:
+```
+https://repo.maven.apache.org/maven2/org/springframework/cloud/stream/app/{name}-{binder}/{version}/{name}-{binder}-{version}.jar
+```
+
+The complete descriptor (used by `bulk_register_apps`) is at:
+```
+https://repo.maven.apache.org/maven2/org/springframework/cloud/stream/app/
+  stream-applications-descriptor/2025.0.1/
+  stream-applications-descriptor-2025.0.1.rabbit-apps-maven-repo-url.properties
+```
+
+### Upstream App Configuration for CredHub
+
+Upstream apps use standard Spring Boot externalized configuration. When CredHub service instances are bound via SCDF deployer properties, Spring Boot flattens `VCAP_SERVICES` into properties that the upstream apps read natively:
+
+| Upstream App | CredHub Keys to Provision | Maps to Spring Boot Property |
+|---|---|---|
+| `s3` (source/sink) | `spring.cloud.aws.credentials.access-key`, `spring.cloud.aws.credentials.secret-key`, `spring.cloud.aws.region.static` | Spring Cloud AWS auto-configuration |
+| `jdbc` (source/sink) | `spring.datasource.url`, `spring.datasource.username`, `spring.datasource.password` | Spring Boot DataSource auto-configuration |
+| `mongodb` (source/sink) | `spring.data.mongodb.uri` | Spring Boot MongoDB auto-configuration |
+| `mqtt` (source/sink) | `mqtt.url`, `mqtt.username`, `mqtt.password` | Spring Integration MQTT properties |
+| `mail` (source) | `mail.imap.host`, `mail.imap.username`, `mail.imap.password` | Spring Integration Mail properties |
+| `ftp` / `sftp` | `ftp.host`, `ftp.username`, `ftp.password` | Spring Integration FTP/SFTP properties |
+
+**Key insight:** Because CredHub service instance credentials are flattened into Spring Boot properties via `VCAP_SERVICES`, they can be named to match the upstream app's expected property keys directly. No wrapper code or credential-bridging beans are needed.
+
+---
+
+## Custom RAG-Specific Stream App Specifications
+
+These apps do not exist in the upstream catalog and are built as Maven submodules in `stream-apps/`, published to GitHub Releases.
 
 Each app separates configuration into two categories:
-- **Stream properties** -- Non-sensitive configuration passed as SCDF stream definition properties (e.g., bucket name, chunk size)
+- **Stream properties** -- Non-sensitive configuration passed as SCDF stream definition properties (e.g., chunk size, embedding model)
 - **CredHub credentials** -- Sensitive values stored in a CredHub service instance and injected via `VCAP_SERVICES` at runtime
-
-### s3-source
-
-Polls an AWS S3 bucket for new objects and emits their content as messages.
-
-- **Function model:** `Supplier<Flux<Message<byte[]>>>`
-- **Dependencies:** AWS SDK v2 (`software.amazon.awssdk:s3`), Spring Cloud Stream, RabbitMQ binder
-- **Stream properties (non-sensitive):**
-  - `s3.bucket` -- S3 bucket name (required)
-  - `s3.region` -- AWS region (default: `us-east-1`)
-  - `s3.prefix` -- Object key prefix filter (default: empty)
-  - `s3.poll-interval` -- Polling interval in seconds (default: `30`)
-- **CredHub credentials (sensitive):**
-  - `AWS_ACCESS_KEY_ID` -- AWS access key ID
-  - `AWS_SECRET_ACCESS_KEY` -- AWS secret access key
-- **CredHub service instance:** `{pipeline}-s3-source-creds`
-
-### http-source
-
-Receives files via HTTP POST and emits their content as messages.
-
-- **Function model:** HTTP endpoint `Supplier` via Spring Web
-- **Dependencies:** Spring Web, Spring Cloud Stream, RabbitMQ binder
-- **Stream properties (non-sensitive):**
-  - `http.path-pattern` -- URL path to listen on (default: `/ingest`)
-  - `http.max-file-size` -- Maximum upload size (default: `10MB`)
-- **CredHub credentials:** None required
 
 ### text-extractor-processor
 
@@ -676,9 +773,9 @@ Writes vector embeddings to a PostgreSQL database with the PgVector extension.
 
 ## GitHub Actions Workflows
 
-### build-stream-apps.yml (CI for pre-built apps)
+### build-stream-apps.yml (CI for custom RAG apps)
 
-Triggered on push to `stream-apps/` or manually. Builds all submodules, runs tests, and publishes JARs as GitHub Release assets.
+Triggered on push to `stream-apps/` or manually. Builds all custom RAG app submodules, runs tests, and publishes JARs as GitHub Release assets.
 
 ```yaml
 # Key steps:
@@ -791,17 +888,20 @@ skills:
 - The p-dataflow service binding on CF provides OAuth2 credentials (`client-id`, `client-secret`, `access-token-url`) and the `dataflow-url` via `VCAP_SERVICES` -- no manual environment variables needed.
 - Spring Security's `HttpSecurity` bean is required by `CloudFoundryActuatorAutoConfiguration` on CF; excluding `SecurityAutoConfiguration` breaks it. A `SecurityConfig` that permits all requests is the correct approach.
 
-### Phase 2: Pre-built Stream Apps
+### Phase 2: Stream Apps (Upstream Integration + Custom RAG Apps)
 
-- Create `stream-apps/` submodules for each common RAG component:
-  - `s3-source` -- Supplier polling S3 with AWS SDK v2
-  - `http-source` -- Supplier receiving HTTP POST webhooks
-  - `text-extractor-processor` -- Function extracting text via Apache Tika
+- Add `bulk_register_apps` tool to `ScdfTools` and `ScdfService`:
+  - Fetches the upstream Spring Cloud Stream Applications 2025.0.1 RabbitMQ descriptor from Maven Central
+  - Parses the properties file and registers each app with SCDF via the existing `registerApp` method
+  - Metadata-only registration -- no JARs downloaded until stream deployment
+- Redeploy SCDF MCP server to Cloud Foundry with the new tool
+- Create `stream-apps/` submodules for custom RAG-specific components (not available upstream):
+  - `text-extractor-processor` -- Function extracting text from PDF/DOCX/TXT via Apache Tika
   - `text-chunker-processor` -- Function splitting text into overlapping chunks
   - `embedding-processor` -- Function calling embedding APIs via Spring AI
-  - `pgvector-sink` -- Consumer writing to PgVector via Spring AI
-- Each app: Spring Boot 3.x + Spring Cloud Stream 4.x + RabbitMQ binder
-- Create `build-stream-apps.yml` GitHub Actions workflow for CI + publish to Releases
+  - `pgvector-sink` -- Consumer writing embeddings to PgVector via Spring AI VectorStore
+- Each custom app: Spring Boot 3.x + Spring Cloud Stream 4.x + RabbitMQ binder
+- Create `build-stream-apps.yml` GitHub Actions workflow for CI + publish custom apps to Releases
 - Create `build-custom-app.yml` GitHub Actions workflow (triggered via `workflow_dispatch`)
 
 ### Phase 3: Goose Skill + References
@@ -834,41 +934,41 @@ skills:
 1. **Skill activates** -- Goose recognizes this as a RAG pipeline request and loads `rag-pipeline-builder`
 
 2. **Component identification** -- Agent reads `references/prebuilt-apps.md` and identifies:
-   - Source: `s3-source` (pre-built)
-   - Processors: `text-extractor`, `text-chunker`, `embedding` (all pre-built)
-   - Sink: `pgvector-sink` (pre-built)
-   - No custom apps needed
+   - Source: `s3` (upstream -- Spring Cloud Stream Applications 2025.0.1)
+   - Processors: `text-extractor`, `text-chunker`, `embedding` (custom RAG apps)
+   - Sink: `pgvector-sink` (custom RAG app)
+   - No fully custom (agent-generated) apps needed
 
 3. **Credential gathering** -- Agent reads `references/credhub-patterns.md` and asks for:
-   - AWS access key and secret key (for `s3-source`)
-   - OpenAI API key (for `embedding`)
-   - PgVector JDBC URL, username, password (for `pgvector-sink`)
+   - AWS access key, secret key, and region (for upstream `s3` source)
+   - OpenAI API key (for custom `embedding` processor)
+   - PgVector JDBC URL, username, password (for custom `pgvector-sink`)
 
 4. **Credential provisioning via subagent** -- Agent spawns `credential-provisioner` subagent:
    - Subagent uses **CF MCP server** to create:
-     - `cf create-service credhub default legal-docs-rag-s3-source-creds -c '{"AWS_ACCESS_KEY_ID":"AKIA...","AWS_SECRET_ACCESS_KEY":"..."}'`
+     - `cf create-service credhub default legal-docs-rag-s3-creds -c '{"spring.cloud.aws.credentials.access-key":"AKIA...","spring.cloud.aws.credentials.secret-key":"...","spring.cloud.aws.region.static":"us-west-2"}'`
      - `cf create-service credhub default legal-docs-rag-embedding-creds -c '{"EMBEDDING_API_KEY":"sk-..."}'`
-     - `cf create-service credhub default legal-docs-rag-pgvector-sink-creds -c '{"PGVECTOR_URL":"...","PGVECTOR_USERNAME":"...","PGVECTOR_PASSWORD":"..."}'`
-   - Subagent returns: `{"s3-source": "legal-docs-rag-s3-source-creds", "embedding": "legal-docs-rag-embedding-creds", "pgvector-sink": "legal-docs-rag-pgvector-sink-creds"}`
+     - `cf create-service credhub default legal-docs-rag-pgvector-sink-creds -c '{"pgvector.url":"jdbc:postgresql://...","pgvector.username":"...","pgvector.password":"..."}'`
+   - Subagent returns: `{"s3": "legal-docs-rag-s3-creds", "embedding": "legal-docs-rag-embedding-creds", "pgvector-sink": "legal-docs-rag-pgvector-sink-creds"}`
 
 5. **App registration** -- Agent uses **SCDF MCP server**:
-   - `register_app(name="s3-source", type="source", uri="https://github.com/.../s3-source-1.0.0.jar")`
+   - `bulk_register_apps()` -- registers the full upstream catalog (S3, HTTP, JDBC, etc.) from Maven Central (idempotent, metadata-only)
    - `register_app(name="text-extractor", type="processor", uri="https://github.com/.../text-extractor-1.0.0.jar")`
    - `register_app(name="text-chunker", type="processor", uri="https://github.com/.../text-chunker-1.0.0.jar")`
    - `register_app(name="embedding", type="processor", uri="https://github.com/.../embedding-1.0.0.jar")`
    - `register_app(name="pgvector-sink", type="sink", uri="https://github.com/.../pgvector-sink-1.0.0.jar")`
 
 6. **Stream creation** -- Agent uses **SCDF MCP server**:
-   - `create_stream(name="legal-docs-rag", definition="s3-source | text-extractor | text-chunker | embedding | pgvector-sink")`
+   - `create_stream(name="legal-docs-rag", definition="s3 | text-extractor | text-chunker | embedding | pgvector-sink")`
 
 7. **Stream deployment** -- Agent uses **SCDF MCP server** (guided by `references/scdf-deployment.md`):
    - `deploy_stream(name="legal-docs-rag", properties={...})` with:
      ```
-     deployer.s3-source.cloudfoundry.services=legal-docs-rag-s3-source-creds
+     deployer.s3.cloudfoundry.services=legal-docs-rag-s3-creds
      deployer.embedding.cloudfoundry.services=legal-docs-rag-embedding-creds
      deployer.pgvector-sink.cloudfoundry.services=legal-docs-rag-pgvector-sink-creds
-     app.s3-source.s3.bucket=legal-docs
-     app.s3-source.s3.region=us-west-2
+     app.s3.file.consumer.mode=contents
+     app.s3.s3.remote-dir=legal-docs
      app.embedding.embedding.model=text-embedding-3-small
      deployer.*.memory=1024
      ```
@@ -880,8 +980,8 @@ skills:
 
 **Pipeline teardown (when requested):**
 1. Agent uses **SCDF MCP server**: `undeploy_stream("legal-docs-rag")`, then `destroy_stream("legal-docs-rag")`
-2. Agent uses **CF MCP server**: `cf delete-service legal-docs-rag-s3-source-creds`, etc. for each CredHub service instance
+2. Agent uses **CF MCP server**: `cf delete-service legal-docs-rag-s3-creds`, `cf delete-service legal-docs-rag-embedding-creds`, `cf delete-service legal-docs-rag-pgvector-sink-creds`
 
 **Credential rotation:**
-- Agent uses **CF MCP server**: `cf update-service legal-docs-rag-s3-source-creds -c '{"AWS_ACCESS_KEY_ID":"new-key",...}'`
+- Agent uses **CF MCP server**: `cf update-service legal-docs-rag-s3-creds -c '{"spring.cloud.aws.credentials.access-key":"new-key",...}'`
 - Agent uses **CF MCP server**: `cf restart` the bound app (or the agent uses **SCDF MCP server** to undeploy/redeploy the stream)

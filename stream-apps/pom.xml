@@ -15,12 +15,15 @@
     <version>0.0.1-SNAPSHOT</version>
     <packaging>pom</packaging>
     <name>stream-apps</name>
-    <description>Pre-built configurable stream apps for RAG ingestion pipelines</description>
+    <description>Custom RAG-specific stream apps (not available in the upstream Spring Cloud Stream Applications catalog)</description>
 
     <properties>
         <java.version>21</java.version>
     </properties>
 
-    <!-- Stream app submodules will be added in Phase 2 -->
+    <!-- Custom RAG app submodules will be added in Phase 2:
+         text-extractor-processor, text-chunker-processor, embedding-processor, pgvector-sink.
+         Upstream apps (S3, HTTP, JDBC, etc.) are registered directly from Maven Central
+         via the SCDF MCP server's bulk_register_apps tool. -->
 
 </project>
