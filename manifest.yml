@@ -4,6 +4,7 @@ applications:
     memory: 1G
     buildpacks:
       - java_buildpack_offline
+    services:
+      - dataflow
     env:
       JBP_CONFIG_OPEN_JDK_JRE: '{ jre: { version: 21.+ } }'
-      SCDF_SERVER_URL: https://scdf-server.apps.tas-ndc.kuhn-labs.com

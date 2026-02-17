@@ -31,3 +31,6 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### CF deployment secrets ###
+vars.yaml

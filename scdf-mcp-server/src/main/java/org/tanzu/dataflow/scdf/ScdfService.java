@@ -1,135 +1,188 @@
 package org.tanzu.dataflow.scdf;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import org.springframework.cloud.dataflow.core.ApplicationType;
-import org.springframework.cloud.dataflow.rest.client.DataFlowOperations;
-import org.springframework.cloud.dataflow.rest.resource.AppRegistrationResource;
-import org.springframework.cloud.dataflow.rest.resource.StreamDefinitionResource;
-import org.springframework.cloud.dataflow.rest.resource.StreamStatusResource;
-import org.springframework.hateoas.PagedModel;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestClient;
 
 import org.tanzu.dataflow.model.AppInstanceStatus;
 import org.tanzu.dataflow.model.StreamAppInfo;
 import org.tanzu.dataflow.model.StreamStatus;
 
 /**
- * Thin wrapper around {@link DataFlowOperations} that translates between the
- * SCDF REST client types and the domain model records exposed by MCP tools.
+ * Calls the SCDF REST API directly using an OAuth2-authenticated {@link RestClient}.
+ * This avoids the binary-incompatible {@code spring-cloud-dataflow-rest-client}
+ * (compiled against Spring 5.x) and works cleanly with Spring Boot 3.5.x / Spring 6.x.
  */
 @Service
 public class ScdfService {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    private final DataFlowOperations dataFlow;
+    private final RestClient restClient;
 
-    ScdfService(DataFlowOperations dataFlow) {
-        this.dataFlow = dataFlow;
+    ScdfService(RestClient scdfRestClient) {
+        this.restClient = scdfRestClient;
     }
 
     // ── App Registration ──────────────────────────────────────────────
 
-    @SuppressWarnings("deprecation")
     public StreamAppInfo registerApp(String name, String type, String uri) {
-        var appType = ApplicationType.valueOf(type);
-        var registered = dataFlow.appRegistryOperations()
-                .register(name, appType, uri, null, true);
-        return toStreamAppInfo(registered);
+        restClient.post()
+                .uri("/apps/{type}/{name}", type, name)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body("uri=" + encodeValue(uri) + "&force=true")
+                .retrieve()
+                .toBodilessEntity();
+
+        return new StreamAppInfo(name, type, uri, null);
     }
 
     public List<StreamAppInfo> listRegisteredApps(String type) {
-        PagedModel<AppRegistrationResource> page = (type == null || type.isBlank())
-                ? dataFlow.appRegistryOperations().list()
-                : dataFlow.appRegistryOperations().list(ApplicationType.valueOf(type));
-        return page.getContent().stream()
-                .map(this::toStreamAppInfo)
-                .toList();
+        String uri = (type == null || type.isBlank()) ? "/apps" : "/apps?type=" + type;
+        var json = restClient.get()
+                .uri(uri)
+                .retrieve()
+                .body(JsonNode.class);
+
+        var apps = new ArrayList<StreamAppInfo>();
+        if (json != null && json.has("_embedded") && json.get("_embedded").has("appRegistrationResourceList")) {
+            for (JsonNode app : json.get("_embedded").get("appRegistrationResourceList")) {
+                apps.add(new StreamAppInfo(
+                        app.path("name").asText(),
+                        app.path("type").asText(),
+                        app.path("uri").asText(null),
+                        app.path("version").asText(null)));
+            }
+        }
+        return apps;
     }
 
     // ── Stream Lifecycle ──────────────────────────────────────────────
 
     public StreamStatus createStream(String name, String definition, String description) {
-        var resource = dataFlow.streamOperations()
-                .createStream(name, definition, description, false);
-        return toStreamStatus(resource);
+        var body = "name=" + encodeValue(name) +
+                "&definition=" + encodeValue(definition) +
+                "&deploy=false";
+        if (description != null && !description.isBlank()) {
+            body += "&description=" + encodeValue(description);
+        }
+
+        restClient.post()
+                .uri("/streams/definitions")
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body(body)
+                .retrieve()
+                .toBodilessEntity();
+
+        return new StreamStatus(name, "created", description, Map.of());
     }
 
     public StreamStatus deployStream(String name, String propertiesJson) {
         Map<String, String> properties = parseProperties(propertiesJson);
-        dataFlow.streamOperations().deploy(name, properties);
+
+        restClient.post()
+                .uri("/streams/deployments/{name}", name)
+                .header("Content-Type", "application/json")
+                .body(properties)
+                .retrieve()
+                .toBodilessEntity();
+
         return getStreamStatus(name);
     }
 
     public String undeployStream(String name) {
-        dataFlow.streamOperations().undeploy(name);
+        restClient.delete()
+                .uri("/streams/deployments/{name}", name)
+                .retrieve()
+                .toBodilessEntity();
+
         return "Stream '%s' undeployed successfully.".formatted(name);
     }
 
     public String destroyStream(String name) {
-        dataFlow.streamOperations().destroy(name);
+        restClient.delete()
+                .uri("/streams/definitions/{name}", name)
+                .retrieve()
+                .toBodilessEntity();
+
         return "Stream '%s' destroyed successfully.".formatted(name);
     }
 
     // ── Stream Status ─────────────────────────────────────────────────
 
     public StreamStatus getStreamStatus(String name) {
-        var definition = dataFlow.streamOperations().getStreamDefinition(name);
-        var runtimePage = dataFlow.runtimeOperations().streamStatus(name);
-        Map<String, List<AppInstanceStatus>> appStatuses = new LinkedHashMap<>();
+        var json = restClient.get()
+                .uri("/streams/definitions/{name}", name)
+                .retrieve()
+                .body(JsonNode.class);
 
-        for (StreamStatusResource statusResource : runtimePage) {
-            statusResource.getApplications().getContent().forEach(appStatus -> {
-                var instances = appStatus.getInstances().getContent().stream()
-                        .map(inst -> new AppInstanceStatus(
-                                inst.getInstanceId(),
-                                inst.getState(),
-                                inst.getAttributes()))
-                        .toList();
-                appStatuses.put(appStatus.getDeploymentId(), instances);
-            });
+        String status = json != null ? json.path("status").asText("unknown") : "unknown";
+        String desc = json != null ? json.path("description").asText(null) : null;
+
+        Map<String, List<AppInstanceStatus>> appStatuses = new LinkedHashMap<>();
+        var runtimeJson = restClient.get()
+                .uri("/runtime/streams/{name}", name)
+                .retrieve()
+                .body(JsonNode.class);
+
+        if (runtimeJson != null && runtimeJson.has("_embedded")
+                && runtimeJson.get("_embedded").has("streamStatusResourceList")) {
+            for (JsonNode streamStatus : runtimeJson.get("_embedded").get("streamStatusResourceList")) {
+                if (streamStatus.has("applications") && streamStatus.get("applications").has("_embedded")
+                        && streamStatus.get("applications").get("_embedded").has("appStatusResourceList")) {
+                    for (JsonNode appStatus : streamStatus.get("applications").get("_embedded").get("appStatusResourceList")) {
+                        String deploymentId = appStatus.path("deploymentId").asText();
+                        var instances = new ArrayList<AppInstanceStatus>();
+                        if (appStatus.has("instances") && appStatus.get("instances").has("_embedded")
+                                && appStatus.get("instances").get("_embedded").has("appInstanceStatusResourceList")) {
+                            for (JsonNode inst : appStatus.get("instances").get("_embedded").get("appInstanceStatusResourceList")) {
+                                var attrs = new LinkedHashMap<String, String>();
+                                inst.path("attributes").fields().forEachRemaining(
+                                        e -> attrs.put(e.getKey(), e.getValue().asText()));
+                                instances.add(new AppInstanceStatus(
+                                        inst.path("instanceId").asText(),
+                                        inst.path("state").asText(),
+                                        attrs));
+                            }
+                        }
+                        appStatuses.put(deploymentId, instances);
+                    }
+                }
+            }
         }
 
-        return new StreamStatus(
-                definition.getName(),
-                definition.getStatus(),
-                definition.getDescription(),
-                appStatuses
-        );
+        return new StreamStatus(name, status, desc, appStatuses);
     }
 
     public List<StreamStatus> listStreams() {
-        var page = dataFlow.streamOperations().list();
-        return page.getContent().stream()
-                .map(this::toStreamStatus)
-                .toList();
+        var json = restClient.get()
+                .uri("/streams/definitions")
+                .retrieve()
+                .body(JsonNode.class);
+
+        var streams = new ArrayList<StreamStatus>();
+        if (json != null && json.has("_embedded")
+                && json.get("_embedded").has("streamDefinitionResourceList")) {
+            for (JsonNode def : json.get("_embedded").get("streamDefinitionResourceList")) {
+                streams.add(new StreamStatus(
+                        def.path("name").asText(),
+                        def.path("status").asText("unknown"),
+                        def.path("description").asText(null),
+                        Map.of()));
+            }
+        }
+        return streams;
     }
 
-    // ── Mapping Helpers ───────────────────────────────────────────────
-
-    private StreamAppInfo toStreamAppInfo(AppRegistrationResource resource) {
-        return new StreamAppInfo(
-                resource.getName(),
-                resource.getType(),
-                resource.getUri(),
-                resource.getVersion()
-        );
-    }
-
-    private StreamStatus toStreamStatus(StreamDefinitionResource resource) {
-        return new StreamStatus(
-                resource.getName(),
-                resource.getStatus(),
-                resource.getDescription(),
-                Map.of()
-        );
-    }
+    // ── Helpers ───────────────────────────────────────────────────────
 
     private Map<String, String> parseProperties(String propertiesJson) {
         if (propertiesJson == null || propertiesJson.isBlank()) {
@@ -141,5 +194,9 @@ public class ScdfService {
             throw new IllegalArgumentException(
                     "Failed to parse deployer properties JSON: " + e.getMessage(), e);
         }
+    }
+
+    private static String encodeValue(String value) {
+        return java.net.URLEncoder.encode(value, java.nio.charset.StandardCharsets.UTF_8);
     }
 }
