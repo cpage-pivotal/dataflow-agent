@@ -88,7 +88,7 @@ graph TB
     BuildSubagent -->|commit code, trigger build| GH_MCP
     BuildSubagent -->|generate code| BuildSubagent
 
-    SCDF_MCP -->|DataFlowTemplate| SCDFServer
+    SCDF_MCP -->|REST API + OAuth2| SCDFServer
     CF_MCP -->|CF API| CredHubBroker
     GH_MCP -->|GitHub API| Repo
     Repo --> Actions
@@ -125,7 +125,7 @@ graph TB
 
 This project lives entirely in the `tanzu-dataflow` repo and produces:
 
-1. **An SCDF MCP Server** (Spring Boot, Streamable HTTP) deployed to Cloud Foundry -- a focused, thin wrapper around `DataFlowTemplate` that exposes SCDF operations as MCP tools. This is the **only custom MCP server** we build. CredHub provisioning uses the existing CF MCP server; GitHub operations use the community GitHub MCP server.
+1. **An SCDF MCP Server** (Spring Boot, Streamable HTTP) deployed to Cloud Foundry -- a focused, thin REST client that calls the SCDF REST API directly (authenticated via OAuth2 client credentials from the p-dataflow service binding) and exposes SCDF operations as MCP tools. This is the **only custom MCP server** we build. CredHub provisioning uses the existing CF MCP server; GitHub operations use the community GitHub MCP server.
 
 2. **Pre-built configurable stream apps** as Maven submodules, published to GitHub Releases, covering common RAG pipeline components (S3 source, text extractor, chunker, embedding processor, PgVector sink)
 
@@ -144,13 +144,14 @@ tanzu-dataflow/
 ├── PLAN.md                              # This file
 │
 ├── scdf-mcp-server/                     # SCDF MCP Server module (only custom server)
-│   ├── pom.xml                          # spring-ai-starter-mcp-server-webmvc + SCDF client
+│   ├── pom.xml                          # spring-ai-starter-mcp-server-webmvc + OAuth2 client
 │   └── src/main/java/org/tanzu/dataflow/
 │       ├── ScdfMcpServerApplication.java
 │       ├── scdf/                        # SCDF integration
 │       │   ├── ScdfTools.java           # @McpTool methods: register, create, deploy, status
-│       │   ├── ScdfService.java         # DataFlowTemplate wrapper
-│       │   └── ScdfConfig.java          # SCDF server connection configuration
+│       │   ├── ScdfService.java         # Calls SCDF REST API directly via RestClient
+│       │   ├── ScdfConfig.java          # OAuth2 client credentials + RestClient from p-dataflow binding
+│       │   └── SecurityConfig.java      # Permits all inbound requests (MCP server, not a web app)
 │       └── model/                       # Domain model (shared records)
 │           ├── StreamAppInfo.java       # Record: app name, type, uri, version
 │           ├── StreamStatus.java        # Record: stream name, status, description, app statuses
@@ -238,9 +239,11 @@ Three MCP servers provide focused, composable tool access. Only one is custom-bu
 
 ### SCDF MCP Server (custom -- this project)
 
-A focused Spring Boot MCP server that wraps `DataFlowTemplate` for SCDF operations. This is the **only custom MCP server** we build.
+A focused Spring Boot MCP server that calls the SCDF REST API directly via an OAuth2-authenticated `RestClient`. This is the **only custom MCP server** we build.
 
-#### Dependency
+**Why not `DataFlowTemplate`?** The `spring-cloud-dataflow-rest-client` (latest on Maven Central: 2.11.5) was compiled against Spring Framework 5.x. It is binary-incompatible with Spring Boot 3.5.x / Spring Framework 6.x -- specifically, `VndErrorResponseErrorHandler` calls `ClientHttpResponse.getStatusCode()` which returned `HttpStatus` in Spring 5 but returns `HttpStatusCode` in Spring 6. The app crashes on startup. Instead, `ScdfService` calls the SCDF REST API endpoints directly using Spring 6's `RestClient` and parses the HAL+JSON responses with Jackson.
+
+#### Dependencies
 
 Use `spring-ai-starter-mcp-server-webmvc` with `spring.ai.mcp.server.protocol=STREAMABLE`.
 
@@ -249,7 +252,10 @@ Use `spring-ai-starter-mcp-server-webmvc` with `spring.ai.mcp.server.protocol=ST
 Key dependencies in `scdf-mcp-server/pom.xml`:
 
 - `org.springframework.ai:spring-ai-starter-mcp-server-webmvc:1.1.2` -- MCP server with Streamable HTTP support (Spring Boot 3.5.x)
-- `org.springframework.cloud:spring-cloud-dataflow-rest-client:2.11.5` -- SCDF REST client with DataFlowTemplate (latest on Maven Central)
+- `org.springframework.boot:spring-boot-starter-oauth2-client` -- OAuth2 client credentials for authenticating to the SCDF server via the p-dataflow service binding
+- `org.springframework.boot:spring-boot-starter-actuator` -- Health checks on Cloud Foundry
+
+**Note:** `spring-cloud-dataflow-rest-client` is **not used** due to Spring 5/6 binary incompatibility (see above).
 
 **Annotation package note:** The `@McpTool` and `@McpToolParam` annotations are provided by the `org.springaicommunity:mcp-annotations` transitive dependency. The import is `org.springaicommunity.mcp.annotation.McpTool` (not `org.springframework.ai`).
 
@@ -324,55 +330,88 @@ public class ScdfTools {
 }
 ```
 
-#### SCDF Integration (DataFlowTemplate)
+#### SCDF Integration (RestClient + OAuth2 Service Binding)
 
-`ScdfConfig` creates the `DataFlowOperations` bean, and `ScdfService` wraps it:
+The SCDF MCP server authenticates to the SCDF REST API using **OAuth2 client credentials** provided by the Cloud Foundry **p-dataflow service binding**. When the `dataflow` service instance is bound to the app in the manifest, Cloud Foundry injects `VCAP_SERVICES` which Spring Boot automatically flattens into properties:
+
+- `vcap.services.dataflow.credentials.dataflow-url` -- SCDF REST API base URL
+- `vcap.services.dataflow.credentials.client-id` -- OAuth2 client ID
+- `vcap.services.dataflow.credentials.client-secret` -- OAuth2 client secret
+- `vcap.services.dataflow.credentials.access-token-url` -- UAA token endpoint
+
+`ScdfConfig` reads these properties and creates an OAuth2-authenticated `RestClient`:
 
 ```java
-// ScdfConfig.java -- connection configuration
+// ScdfConfig.java -- OAuth2 client credentials from p-dataflow service binding
 @Bean
-DataFlowOperations dataFlowOperations(@Value("${scdf.server.url}") String scdfServerUrl) {
-    return new DataFlowTemplate(URI.create(scdfServerUrl), null);
+ClientRegistrationRepository clientRegistrationRepository(
+        @Value("${vcap.services.dataflow.credentials.client-id}") String clientId,
+        @Value("${vcap.services.dataflow.credentials.client-secret}") String clientSecret,
+        @Value("${vcap.services.dataflow.credentials.access-token-url}") String tokenUri) {
+
+    ClientRegistration registration = ClientRegistration.withRegistrationId("scdf")
+            .clientId(clientId)
+            .clientSecret(clientSecret)
+            .authorizationGrantType(AuthorizationGrantType.CLIENT_CREDENTIALS)
+            .tokenUri(tokenUri)
+            .build();
+
+    return new InMemoryClientRegistrationRepository(registration);
+}
+
+@Bean
+RestClient scdfRestClient(
+        @Value("${vcap.services.dataflow.credentials.dataflow-url}") String dataflowUrl,
+        OAuth2AuthorizedClientManager authorizedClientManager) {
+
+    var oauth2Interceptor = new OAuth2ClientHttpRequestInterceptor(authorizedClientManager);
+    oauth2Interceptor.setClientRegistrationIdResolver(request -> "scdf");
+
+    return RestClient.builder()
+            .baseUrl(dataflowUrl)
+            .requestInterceptor(oauth2Interceptor)
+            .build();
 }
 ```
 
+`ScdfService` calls the SCDF REST API directly and parses HAL+JSON responses:
+
 ```java
-// ScdfService.java -- register a pre-built app
-dataFlow.appRegistryOperations()
-    .register("s3-source", ApplicationType.source,
-              "https://github.com/.../releases/download/v1.0/s3-source-1.0.0.jar",
-              null, true);
+// ScdfService.java -- register a pre-built app via POST /apps/{type}/{name}
+restClient.post()
+        .uri("/apps/{type}/{name}", type, name)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("uri=" + encodeValue(uri) + "&force=true")
+        .retrieve()
+        .toBodilessEntity();
 
-// Create a stream definition (without deploying)
-dataFlow.streamOperations()
-    .createStream("rag-pipeline-1",
-                  "s3-source | text-extractor | text-chunker | embedding | pgvector-sink",
-                  "RAG pipeline for legal docs", false);
+// Create a stream definition via POST /streams/definitions
+restClient.post()
+        .uri("/streams/definitions")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("name=" + encodeValue(name) + "&definition=" + encodeValue(definition) + "&deploy=false")
+        .retrieve()
+        .toBodilessEntity();
 
-// Deploy with properties
-dataFlow.streamOperations().deploy("rag-pipeline-1", deploymentProperties);
+// Deploy with properties via POST /streams/deployments/{name}
+restClient.post()
+        .uri("/streams/deployments/{name}", name)
+        .header("Content-Type", "application/json")
+        .body(deploymentProperties)
+        .retrieve()
+        .toBodilessEntity();
 ```
 
-Example deployment with CredHub service bindings:
+`SecurityConfig` permits all inbound requests (the MCP server is an API, not a user-facing web app) and provides the `HttpSecurity` bean required by Cloud Foundry's actuator auto-configuration:
 
 ```java
-Map<String, String> deploymentProperties = new HashMap<>();
-
-// Bind CredHub service instances to specific apps in the stream
-deploymentProperties.put(
-    "deployer.s3-source.cloudfoundry.services",
-    "legal-docs-rag-s3-source-creds");
-deploymentProperties.put(
-    "deployer.embedding.cloudfoundry.services",
-    "legal-docs-rag-embedding-creds");
-deploymentProperties.put(
-    "deployer.pgvector-sink.cloudfoundry.services",
-    "legal-docs-rag-pgvector-sink-creds");
-
-// Memory/instance configuration
-deploymentProperties.put("deployer.*.memory", "1024");
-
-stream.deploy(deploymentProperties);
+@Bean
+SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+    return http
+            .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
+            .csrf(csrf -> csrf.disable())
+            .build();
+}
 ```
 
 ### Cloud Foundry MCP Server (existing)
@@ -676,10 +715,9 @@ spring.ai.mcp.server.name=scdf-mcp-server
 spring.ai.mcp.server.version=1.0.0
 spring.ai.mcp.server.protocol=STREAMABLE
 spring.ai.mcp.server.type=SYNC
-
-# SCDF connection
-scdf.server.url=${SCDF_SERVER_URL:http://localhost:9393}
 ```
+
+**Note:** No SCDF connection properties are needed in `application.properties`. The SCDF URL and OAuth2 credentials are read from `VCAP_SERVICES` (populated by the `dataflow` service binding in the manifest).
 
 ### Cloud Foundry Manifest (manifest.yml)
 
@@ -690,10 +728,13 @@ applications:
     memory: 1G
     buildpacks:
       - java_buildpack_offline
+    services:
+      - dataflow
     env:
       JBP_CONFIG_OPEN_JDK_JRE: '{ jre: { version: 21.+ } }'
-      SCDF_SERVER_URL: https://scdf-server.apps.tas-ndc.kuhn-labs.com
 ```
+
+**Note:** The `dataflow` service binding provides the SCDF URL, OAuth2 client ID/secret, and token URL via `VCAP_SERVICES`. No manual `SCDF_SERVER_URL` environment variable is needed.
 
 ### Registration with goose-agent-chat
 
@@ -734,13 +775,21 @@ skills:
 ### Phase 1: Foundation -- SCDF MCP Server ✅
 
 - [x] Set up multi-module Maven project (parent aggregator POM, `scdf-mcp-server/`, `stream-apps/`)
-- [x] Configure `scdf-mcp-server/pom.xml` with Spring Boot 3.5.10, `spring-ai-starter-mcp-server-webmvc` 1.1.2, and `spring-cloud-dataflow-rest-client` 2.11.5
-- [x] Implement `ScdfConfig` (DataFlowTemplate connection) and `ScdfService` (DataFlowTemplate wrapper)
+- [x] Configure `scdf-mcp-server/pom.xml` with Spring Boot 3.5.10, `spring-ai-starter-mcp-server-webmvc` 1.1.2, and `spring-boot-starter-oauth2-client`
+- [x] Implement `ScdfConfig` (OAuth2 client credentials from p-dataflow service binding + `RestClient`)
+- [x] Implement `ScdfService` (calls SCDF REST API directly, parses HAL+JSON responses)
+- [x] Implement `SecurityConfig` (permits all inbound requests, satisfies CF actuator auto-configuration)
 - [x] Implement `ScdfTools` with `@McpTool`-annotated methods: `register_app`, `list_registered_apps`, `create_stream`, `deploy_stream`, `undeploy_stream`, `destroy_stream`, `get_stream_status`, `list_streams`
 - [x] Domain model records: `StreamAppInfo`, `StreamStatus`, `AppInstanceStatus`
 - [x] Configure `application.properties` with `spring.ai.mcp.server.protocol=STREAMABLE` and `spring.ai.mcp.server.type=SYNC`
-- [x] Create `manifest.yml` for CF deployment
-- [ ] Deploy to Cloud Foundry and verify MCP tool discovery
+- [x] Create `manifest.yml` for CF deployment with `dataflow` service binding
+- [x] Deploy to Cloud Foundry and verify MCP tool discovery
+- [x] Verified: MCP `initialize`, `tools/list` (all 8 tools), and tool calls (`list_streams`, `list_registered_apps`) all work end-to-end with OAuth2 authentication against the live SCDF instance
+
+**Lessons learned:**
+- `spring-cloud-dataflow-rest-client:2.11.5` is binary-incompatible with Spring Boot 3.5.x / Spring Framework 6.x (`ClientHttpResponse.getStatusCode()` return type changed from `HttpStatus` to `HttpStatusCode`). Replaced with direct REST API calls via `RestClient`.
+- The p-dataflow service binding on CF provides OAuth2 credentials (`client-id`, `client-secret`, `access-token-url`) and the `dataflow-url` via `VCAP_SERVICES` -- no manual environment variables needed.
+- Spring Security's `HttpSecurity` bean is required by `CloudFoundryActuatorAutoConfiguration` on CF; excluding `SecurityAutoConfiguration` breaks it. A `SecurityConfig` that permits all requests is the correct approach.
 
 ### Phase 2: Pre-built Stream Apps
 
