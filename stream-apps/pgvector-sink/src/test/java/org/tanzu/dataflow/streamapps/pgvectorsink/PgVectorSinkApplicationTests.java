@@ -10,7 +10,8 @@ import org.springframework.test.context.TestPropertySource;
         "spring.datasource.url=jdbc:postgresql://localhost:5432/testdb",
         "spring.datasource.username=test",
         "spring.datasource.password=test",
-        "spring.ai.vectorstore.pgvector.initialize-schema=false"
+        "spring.ai.vectorstore.pgvector.initialize-schema=false",
+        "spring.ai.openai.api-key=test-key"
 })
 class PgVectorSinkApplicationTests {
 
