@@ -142,16 +142,16 @@ This project lives entirely in the `tanzu-dataflow` repo and produces:
 
 ```
 tanzu-dataflow/
-├── pom.xml                              # Parent POM (multi-module)
-├── manifest.yml                         # CF deployment manifest for SCDF MCP server
+├── pom.xml                              # Parent POM (multi-module aggregator)
 ├── PLAN.md                              # This file
 │
 ├── scdf-mcp-server/                     # SCDF MCP Server module (only custom server)
 │   ├── pom.xml                          # spring-ai-starter-mcp-server-webmvc + OAuth2 client
+│   ├── manifest.yml                     # CF deployment manifest for SCDF MCP server
 │   └── src/main/java/org/tanzu/dataflow/
 │       ├── ScdfMcpServerApplication.java
 │       ├── scdf/                        # SCDF integration
-│       │   ├── ScdfTools.java           # @McpTool methods: register, create, deploy, status
+│       │   ├── ScdfTools.java           # @McpTool methods: bulk_register, register, create, deploy, status
 │       │   ├── ScdfService.java         # Calls SCDF REST API directly via RestClient
 │       │   ├── ScdfConfig.java          # OAuth2 client credentials + RestClient from p-dataflow binding
 │       │   └── SecurityConfig.java      # Permits all inbound requests (MCP server, not a web app)
@@ -161,25 +161,39 @@ tanzu-dataflow/
 │           └── AppInstanceStatus.java   # Record: instance id, state, attributes
 │
 ├── stream-apps/                         # Custom RAG-specific stream apps (not available upstream)
-│   ├── pom.xml                          # Parent for stream app submodules
-│   ├── text-extractor-processor/        # Extracts text from PDF, DOCX, TXT
+│   ├── pom.xml                          # Parent POM: Spring Cloud 2025.0.1 + Spring AI 1.1.2 BOMs
+│   ├── text-extractor-processor/        # Extracts text from PDF, DOCX, TXT via Apache Tika
 │   │   ├── pom.xml
-│   │   └── src/main/java/.../TextExtractorApplication.java
+│   │   └── src/main/java/.../textextractor/
+│   │       ├── TextExtractorApplication.java
+│   │       ├── TextExtractorConfiguration.java   # Function<Message<byte[]>, Message<String>>
+│   │       └── TextExtractorProperties.java      # extractor.formats
 │   ├── text-chunker-processor/          # Splits text into overlapping chunks
 │   │   ├── pom.xml
-│   │   └── src/main/java/.../TextChunkerApplication.java
-│   ├── embedding-processor/             # Calls embedding API (OpenAI, etc.)
+│   │   └── src/main/java/.../textchunker/
+│   │       ├── TextChunkerApplication.java
+│   │       ├── TextChunkerConfiguration.java     # Function<Message<String>, List<Message<String>>>
+│   │       └── TextChunkerProperties.java        # chunker.size, chunker.overlap, chunker.separator
+│   ├── embedding-processor/             # Calls embedding API (OpenAI) via Spring AI
 │   │   ├── pom.xml
-│   │   └── src/main/java/.../EmbeddingProcessorApplication.java
-│   └── pgvector-sink/                   # Writes embeddings to PgVector via Spring AI VectorStore
+│   │   └── src/main/java/.../embedding/
+│   │       ├── EmbeddingProcessorApplication.java
+│   │       ├── EmbeddingConfiguration.java       # Function<Message<String>, Message<float[]>>
+│   │       ├── EmbeddingProperties.java          # embedding.model, embedding.dimensions
+│   │       └── CredHubEmbeddingConfig.java       # Bridges EMBEDDING_API_KEY → spring.ai.openai.api-key
+│   └── pgvector-sink/                   # Writes text to PgVector via Spring AI VectorStore
 │       ├── pom.xml
-│       └── src/main/java/.../PgVectorSinkApplication.java
+│       └── src/main/java/.../pgvectorsink/
+│           ├── PgVectorSinkApplication.java
+│           ├── PgVectorSinkConfiguration.java    # Consumer<Message<String>> (VectorStore handles embedding)
+│           ├── PgVectorSinkProperties.java       # pgvector.table, dimensions, index-type, distance-type
+│           └── CredHubPgVectorConfig.java        # Bridges PGVECTOR_* + EMBEDDING_API_KEY
 │
 ├── .github/workflows/
-│   ├── build-stream-apps.yml            # CI for pre-built apps (build + publish)
-│   └── build-custom-app.yml             # Triggered via workflow_dispatch for custom apps
+│   ├── build-stream-apps.yml            # CI for custom RAG apps (build + publish to Releases)
+│   └── build-custom-app.yml             # Triggered via workflow_dispatch for agent-generated apps
 │
-└── skill/                               # Goose skill for goose-agent-chat
+└── skill/                               # Goose skill for goose-agent-chat (Phase 3)
     └── rag-pipeline-builder/
         ├── SKILL.md                     # Orchestration instructions (<500 lines)
         └── references/                  # Progressive disclosure: loaded on demand
@@ -729,7 +743,7 @@ Extracts text content from binary documents (PDF, DOCX, plain text).
 
 Splits text into overlapping chunks suitable for embedding.
 
-- **Function model:** `Function<Message<String>, Flux<Message<String>>>`
+- **Function model:** `Function<Message<String>, List<Message<String>>>` (one-to-many via collection return)
 - **Dependencies:** Spring Cloud Stream, RabbitMQ binder
 - **Stream properties (non-sensitive):**
   - `chunker.size` -- Chunk size in characters (default: `1000`)
@@ -754,10 +768,10 @@ Calls an embedding API to convert text chunks into vector embeddings.
 
 ### pgvector-sink
 
-Writes vector embeddings to a PostgreSQL database with the PgVector extension.
+Writes text documents to a PostgreSQL database with the PgVector extension. Uses Spring AI's `VectorStore` abstraction, which handles both embedding generation and storage in a single operation -- the sink accepts text, not pre-computed embeddings.
 
-- **Function model:** `Consumer<Message<float[]>>`
-- **Dependencies:** Spring AI PgVector (`spring-ai-starter-vector-store-pgvector`), Spring Cloud Stream, RabbitMQ binder
+- **Function model:** `Consumer<Message<String>>` (VectorStore handles embedding generation internally)
+- **Dependencies:** Spring AI PgVector (`spring-ai-starter-vector-store-pgvector`), Spring AI OpenAI (`spring-ai-starter-model-openai`), Spring Cloud Stream, RabbitMQ binder
 - **Stream properties (non-sensitive):**
   - `pgvector.table` -- Table name for vector storage (default: `vector_store`)
   - `pgvector.dimensions` -- Vector dimensions (default: `1536`)
@@ -767,7 +781,10 @@ Writes vector embeddings to a PostgreSQL database with the PgVector extension.
   - `PGVECTOR_URL` -- JDBC URL for the PostgreSQL database
   - `PGVECTOR_USERNAME` -- Database username
   - `PGVECTOR_PASSWORD` -- Database password
+  - `EMBEDDING_API_KEY` -- API key for the embedding provider (used by VectorStore)
 - **CredHub service instance:** `{pipeline}-pgvector-sink-creds`
+
+**Design note:** Because `VectorStore.add()` in Spring AI 1.1.2 generates embeddings internally (the `Document` class has no `setEmbedding` method), the pgvector-sink accepts text directly rather than pre-computed `float[]` embeddings. This means a typical RAG pipeline can be simplified to `s3 | text-extractor | text-chunker | pgvector-sink` -- the separate `embedding-processor` is not needed in the main pipeline path. The `embedding-processor` remains available for pipelines where embedding generation needs to be decoupled from storage.
 
 ---
 
@@ -816,12 +833,12 @@ spring.ai.mcp.server.type=SYNC
 
 **Note:** No SCDF connection properties are needed in `application.properties`. The SCDF URL and OAuth2 credentials are read from `VCAP_SERVICES` (populated by the `dataflow` service binding in the manifest).
 
-### Cloud Foundry Manifest (manifest.yml)
+### Cloud Foundry Manifest (scdf-mcp-server/manifest.yml)
 
 ```yaml
 applications:
   - name: scdf-mcp-server
-    path: scdf-mcp-server/target/scdf-mcp-server-0.0.1-SNAPSHOT.jar
+    path: target/scdf-mcp-server-0.0.1-SNAPSHOT.jar
     memory: 1G
     buildpacks:
       - java_buildpack_offline
@@ -830,6 +847,8 @@ applications:
     env:
       JBP_CONFIG_OPEN_JDK_JRE: '{ jre: { version: 21.+ } }'
 ```
+
+Deploy from the `scdf-mcp-server/` directory: `cd scdf-mcp-server && cf push`.
 
 **Note:** The `dataflow` service binding provides the SCDF URL, OAuth2 client ID/secret, and token URL via `VCAP_SERVICES`. No manual `SCDF_SERVER_URL` environment variable is needed.
 
@@ -888,21 +907,32 @@ skills:
 - The p-dataflow service binding on CF provides OAuth2 credentials (`client-id`, `client-secret`, `access-token-url`) and the `dataflow-url` via `VCAP_SERVICES` -- no manual environment variables needed.
 - Spring Security's `HttpSecurity` bean is required by `CloudFoundryActuatorAutoConfiguration` on CF; excluding `SecurityAutoConfiguration` breaks it. A `SecurityConfig` that permits all requests is the correct approach.
 
-### Phase 2: Stream Apps (Upstream Integration + Custom RAG Apps)
+### Phase 2: Stream Apps (Upstream Integration + Custom RAG Apps) ✅
 
-- Add `bulk_register_apps` tool to `ScdfTools` and `ScdfService`:
+- [x] Add `bulk_register_apps` tool to `ScdfTools` and `ScdfService`:
   - Fetches the upstream Spring Cloud Stream Applications 2025.0.1 RabbitMQ descriptor from Maven Central
   - Parses the properties file and registers each app with SCDF via the existing `registerApp` method
   - Metadata-only registration -- no JARs downloaded until stream deployment
-- Redeploy SCDF MCP server to Cloud Foundry with the new tool
-- Create `stream-apps/` submodules for custom RAG-specific components (not available upstream):
-  - `text-extractor-processor` -- Function extracting text from PDF/DOCX/TXT via Apache Tika
-  - `text-chunker-processor` -- Function splitting text into overlapping chunks
-  - `embedding-processor` -- Function calling embedding APIs via Spring AI
-  - `pgvector-sink` -- Consumer writing embeddings to PgVector via Spring AI VectorStore
-- Each custom app: Spring Boot 3.x + Spring Cloud Stream 4.x + RabbitMQ binder
-- Create `build-stream-apps.yml` GitHub Actions workflow for CI + publish custom apps to Releases
-- Create `build-custom-app.yml` GitHub Actions workflow (triggered via `workflow_dispatch`)
+- [ ] Redeploy SCDF MCP server to Cloud Foundry with the new `bulk_register_apps` tool
+- [x] Create `stream-apps/pom.xml` parent with shared dependency management: Spring Cloud 2025.0.1 BOM, Spring AI 1.1.2 BOM, Spring Cloud Stream + RabbitMQ binder
+- [x] Create `stream-apps/` submodules for custom RAG-specific components (not available upstream):
+  - `text-extractor-processor` -- `Function<Message<byte[]>, Message<String>>` via Apache Tika 3.2.3
+  - `text-chunker-processor` -- `Function<Message<String>, List<Message<String>>>` with configurable size/overlap/separator
+  - `embedding-processor` -- `Function<Message<String>, Message<float[]>>` via Spring AI OpenAI EmbeddingModel
+  - `pgvector-sink` -- `Consumer<Message<String>>` via Spring AI VectorStore (handles embedding generation internally)
+- [x] Each custom app: Spring Boot 3.5.10 + Spring Cloud Stream 4.x (via 2025.0.1 BOM) + RabbitMQ binder
+- [x] CredHub credential bridging via `@PostConstruct` config classes (`CredHubEmbeddingConfig`, `CredHubPgVectorConfig`)
+- [x] Unit tests for text-extractor and text-chunker; context-load tests for embedding-processor and pgvector-sink
+- [x] Create `build-stream-apps.yml` GitHub Actions workflow for CI + publish custom apps to Releases
+- [x] Create `build-custom-app.yml` GitHub Actions workflow (triggered via `workflow_dispatch`)
+- [x] Move `manifest.yml` from repo root to `scdf-mcp-server/` (it's exclusively for the MCP server)
+- [x] Full project compiles: all 7 modules (scdf-mcp-server + stream-apps parent + 4 submodules + root aggregator)
+
+**Lessons learned:**
+- Spring AI 1.1.2's `Document` class has no `setEmbedding` method. The `VectorStore.add()` pipeline handles embedding generation internally via a configured `EmbeddingModel`. This means the pgvector-sink accepts text (not pre-computed `float[]`) and lets VectorStore handle the full lifecycle. This simplifies the typical RAG pipeline to `s3 | text-extractor | text-chunker | pgvector-sink` -- no separate embedding-processor needed in the main path.
+- The `embedding-processor` is still useful for pipelines where embedding generation is decoupled from storage (e.g., branching pipelines, multi-sink scenarios, or embedding inspection).
+- Spring Cloud Stream's function model supports one-to-many via `Function<T, List<R>>` -- `text-chunker-processor` uses this to emit multiple chunk messages from a single input.
+- The `spring-ai-starter-model-openai` artifact (not `spring-ai-openai`) is the correct starter for Spring AI 1.1.2 auto-configuration.
 
 ### Phase 3: Goose Skill + References
 
@@ -935,52 +965,48 @@ skills:
 
 2. **Component identification** -- Agent reads `references/prebuilt-apps.md` and identifies:
    - Source: `s3` (upstream -- Spring Cloud Stream Applications 2025.0.1)
-   - Processors: `text-extractor`, `text-chunker`, `embedding` (custom RAG apps)
-   - Sink: `pgvector-sink` (custom RAG app)
-   - No fully custom (agent-generated) apps needed
+   - Processors: `text-extractor`, `text-chunker` (custom RAG apps)
+   - Sink: `pgvector-sink` (custom RAG app -- handles embedding generation internally via VectorStore)
+   - No separate `embedding-processor` needed; no fully custom (agent-generated) apps needed
 
 3. **Credential gathering** -- Agent reads `references/credhub-patterns.md` and asks for:
    - AWS access key, secret key, and region (for upstream `s3` source)
-   - OpenAI API key (for custom `embedding` processor)
-   - PgVector JDBC URL, username, password (for custom `pgvector-sink`)
+   - OpenAI API key (for `pgvector-sink` -- used by VectorStore's EmbeddingModel)
+   - PgVector JDBC URL, username, password (for `pgvector-sink`)
 
 4. **Credential provisioning via subagent** -- Agent spawns `credential-provisioner` subagent:
    - Subagent uses **CF MCP server** to create:
      - `cf create-service credhub default legal-docs-rag-s3-creds -c '{"spring.cloud.aws.credentials.access-key":"AKIA...","spring.cloud.aws.credentials.secret-key":"...","spring.cloud.aws.region.static":"us-west-2"}'`
-     - `cf create-service credhub default legal-docs-rag-embedding-creds -c '{"EMBEDDING_API_KEY":"sk-..."}'`
-     - `cf create-service credhub default legal-docs-rag-pgvector-sink-creds -c '{"pgvector.url":"jdbc:postgresql://...","pgvector.username":"...","pgvector.password":"..."}'`
-   - Subagent returns: `{"s3": "legal-docs-rag-s3-creds", "embedding": "legal-docs-rag-embedding-creds", "pgvector-sink": "legal-docs-rag-pgvector-sink-creds"}`
+     - `cf create-service credhub default legal-docs-rag-pgvector-sink-creds -c '{"PGVECTOR_URL":"jdbc:postgresql://...","PGVECTOR_USERNAME":"...","PGVECTOR_PASSWORD":"...","EMBEDDING_API_KEY":"sk-..."}'`
+   - Subagent returns: `{"s3": "legal-docs-rag-s3-creds", "pgvector-sink": "legal-docs-rag-pgvector-sink-creds"}`
 
 5. **App registration** -- Agent uses **SCDF MCP server**:
    - `bulk_register_apps()` -- registers the full upstream catalog (S3, HTTP, JDBC, etc.) from Maven Central (idempotent, metadata-only)
-   - `register_app(name="text-extractor", type="processor", uri="https://github.com/.../text-extractor-1.0.0.jar")`
-   - `register_app(name="text-chunker", type="processor", uri="https://github.com/.../text-chunker-1.0.0.jar")`
-   - `register_app(name="embedding", type="processor", uri="https://github.com/.../embedding-1.0.0.jar")`
+   - `register_app(name="text-extractor", type="processor", uri="https://github.com/.../text-extractor-processor-1.0.0.jar")`
+   - `register_app(name="text-chunker", type="processor", uri="https://github.com/.../text-chunker-processor-1.0.0.jar")`
    - `register_app(name="pgvector-sink", type="sink", uri="https://github.com/.../pgvector-sink-1.0.0.jar")`
 
 6. **Stream creation** -- Agent uses **SCDF MCP server**:
-   - `create_stream(name="legal-docs-rag", definition="s3 | text-extractor | text-chunker | embedding | pgvector-sink")`
+   - `create_stream(name="legal-docs-rag", definition="s3 | text-extractor | text-chunker | pgvector-sink")`
 
 7. **Stream deployment** -- Agent uses **SCDF MCP server** (guided by `references/scdf-deployment.md`):
    - `deploy_stream(name="legal-docs-rag", properties={...})` with:
      ```
      deployer.s3.cloudfoundry.services=legal-docs-rag-s3-creds
-     deployer.embedding.cloudfoundry.services=legal-docs-rag-embedding-creds
      deployer.pgvector-sink.cloudfoundry.services=legal-docs-rag-pgvector-sink-creds
      app.s3.file.consumer.mode=contents
      app.s3.s3.remote-dir=legal-docs
-     app.embedding.embedding.model=text-embedding-3-small
      deployer.*.memory=1024
      ```
 
 8. **Status check** -- Agent uses **SCDF MCP server**:
-   - `get_stream_status(name="legal-docs-rag")` -- confirms all 5 apps are running
+   - `get_stream_status(name="legal-docs-rag")` -- confirms all 4 apps are running
 
 9. **Report to user** -- Agent confirms the pipeline is deployed and running, summarizes the components, and provides the SCDF dashboard URL
 
 **Pipeline teardown (when requested):**
 1. Agent uses **SCDF MCP server**: `undeploy_stream("legal-docs-rag")`, then `destroy_stream("legal-docs-rag")`
-2. Agent uses **CF MCP server**: `cf delete-service legal-docs-rag-s3-creds`, `cf delete-service legal-docs-rag-embedding-creds`, `cf delete-service legal-docs-rag-pgvector-sink-creds`
+2. Agent uses **CF MCP server**: `cf delete-service legal-docs-rag-s3-creds`, `cf delete-service legal-docs-rag-pgvector-sink-creds`
 
 **Credential rotation:**
 - Agent uses **CF MCP server**: `cf update-service legal-docs-rag-s3-creds -c '{"spring.cloud.aws.credentials.access-key":"new-key",...}'`

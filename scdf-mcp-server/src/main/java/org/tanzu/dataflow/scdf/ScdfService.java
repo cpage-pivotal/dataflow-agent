@@ -32,7 +32,44 @@ public class ScdfService {
         this.restClient = scdfRestClient;
     }
 
+    /**
+     * Upstream Spring Cloud Stream Applications 2025.0.1 RabbitMQ descriptor URL.
+     * Each line is "{type}.{name}=https://repo.maven.apache.org/.../{name}-rabbit-5.1.1.jar".
+     * Metadata and bootVersion lines (e.g. source.s3.metadata=...) are skipped.
+     */
+    private static final String UPSTREAM_DESCRIPTOR_URL =
+            "https://repo.maven.apache.org/maven2/org/springframework/cloud/stream/app/" +
+            "stream-applications-descriptor/2025.0.1/" +
+            "stream-applications-descriptor-2025.0.1.rabbit-apps-maven-repo-url.properties";
+
     // ── App Registration ──────────────────────────────────────────────
+
+    public String bulkRegisterApps() {
+        String descriptor = RestClient.create().get()
+                .uri(UPSTREAM_DESCRIPTOR_URL)
+                .retrieve()
+                .body(String.class);
+
+        if (descriptor == null || descriptor.isBlank()) {
+            return "No apps found in upstream descriptor.";
+        }
+
+        int count = 0;
+        for (String line : descriptor.lines().toList()) {
+            if (line.isBlank() || line.startsWith("#")) continue;
+            String[] parts = line.split("=", 2);
+            if (parts.length != 2) continue;
+            String[] keyParts = parts[0].split("\\.", 2);
+            if (keyParts.length != 2 || keyParts[1].contains(".")) continue;
+
+            String type = keyParts[0];
+            String name = keyParts[1];
+            String uri = parts[1].trim();
+            registerApp(name, type, uri);
+            count++;
+        }
+        return "Registered %d upstream Spring Cloud Stream Applications (2025.0.1) with SCDF.".formatted(count);
+    }
 
     public StreamAppInfo registerApp(String name, String type, String uri) {
         restClient.post()

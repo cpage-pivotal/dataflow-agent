@@ -1,6 +1,6 @@
 applications:
   - name: scdf-mcp-server
-    path: scdf-mcp-server/target/scdf-mcp-server-0.0.1-SNAPSHOT.jar
+    path: target/scdf-mcp-server-0.0.1-SNAPSHOT.jar
     memory: 1G
     buildpacks:
       - java_buildpack_offline

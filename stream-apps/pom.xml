@@ -12,18 +12,76 @@
 
     <groupId>org.tanzu</groupId>
     <artifactId>stream-apps</artifactId>
-    <version>0.0.1-SNAPSHOT</version>
+    <version>1.0.0</version>
     <packaging>pom</packaging>
     <name>stream-apps</name>
     <description>Custom RAG-specific stream apps (not available in the upstream Spring Cloud Stream Applications catalog)</description>
 
+    <modules>
+        <module>text-extractor-processor</module>
+        <module>text-chunker-processor</module>
+        <module>embedding-processor</module>
+        <module>pgvector-sink</module>
+    </modules>
+
     <properties>
         <java.version>21</java.version>
+        <spring-cloud.version>2025.0.1</spring-cloud.version>
+        <spring-ai.version>1.1.2</spring-ai.version>
     </properties>
 
-    <!-- Custom RAG app submodules will be added in Phase 2:
-         text-extractor-processor, text-chunker-processor, embedding-processor, pgvector-sink.
-         Upstream apps (S3, HTTP, JDBC, etc.) are registered directly from Maven Central
-         via the SCDF MCP server's bulk_register_apps tool. -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.ai</groupId>
+                <artifactId>spring-ai-bom</artifactId>
+                <version>${spring-ai.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <!-- All stream apps use Spring Cloud Stream with RabbitMQ binder -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-stream</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-stream-binder-rabbit</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-stream-test-binder</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
 
 </project>

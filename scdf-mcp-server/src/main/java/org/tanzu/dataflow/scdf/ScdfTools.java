@@ -22,6 +22,15 @@ public class ScdfTools {
         this.scdfService = scdfService;
     }
 
+    @McpTool(name = "bulk_register_apps", description = """
+            Import the full Spring Cloud Stream Applications catalog (2025.0.1) from Maven Central, \
+            registering all ~50 upstream apps (S3, HTTP, JDBC, FTP, SFTP, MongoDB, TCP, etc.) with SCDF. \
+            This is metadata-only -- no JARs are downloaded until a stream is deployed. \
+            Call this once to make all standard sources, processors, and sinks available.""")
+    public String bulkRegisterApps() {
+        return scdfService.bulkRegisterApps();
+    }
+
     @McpTool(name = "register_app", description = """
             Register a stream app with SCDF. Use type 'source', 'processor', or 'sink'. \
             The uri can be an HTTP URL to a JAR (e.g. a GitHub Release asset) or Maven coordinates.""")

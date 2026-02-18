@@ -1,0 +1,64 @@
+name: Build Stream Apps
+
+on:
+  push:
+    paths:
+      - 'stream-apps/**'
+    branches: [main]
+  pull_request:
+    paths:
+      - 'stream-apps/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Build all custom stream apps
+        run: mvn -pl stream-apps -am clean package -DskipTests=false
+        working-directory: .
+
+      - name: Collect JAR artifacts
+        id: collect
+        run: |
+          mkdir -p artifacts
+          for app in text-extractor-processor text-chunker-processor embedding-processor pgvector-sink; do
+            jar=$(find "stream-apps/${app}/target" -maxdepth 1 -name "*.jar" -not -name "*-plain.jar" | head -1)
+            if [ -n "$jar" ]; then
+              cp "$jar" artifacts/
+              echo "Found: $jar"
+            fi
+          done
+          ls -la artifacts/
+
+      - name: Create or update GitHub Release
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: stream-apps-v${{ github.run_number }}
+          name: Stream Apps Build ${{ github.run_number }}
+          body: |
+            Custom RAG stream apps built from commit ${{ github.sha }}.
+
+            **Apps included:**
+            - text-extractor-processor
+            - text-chunker-processor
+            - embedding-processor
+            - pgvector-sink
+          files: artifacts/*.jar
+          draft: false
+          prerelease: false
