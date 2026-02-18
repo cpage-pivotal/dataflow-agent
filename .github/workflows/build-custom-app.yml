@@ -39,7 +39,7 @@ jobs:
           cache: 'maven'
 
       - name: Build custom app
-        run: mvn -pl "stream-apps-custom/${{ inputs.app_name }}" -am clean package -DskipTests=false
+        run: mvn -f "stream-apps-custom/${{ inputs.app_name }}/pom.xml" clean package
 
       - name: Locate built JAR
         id: jar

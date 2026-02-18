@@ -29,8 +29,7 @@ jobs:
           cache: 'maven'
 
       - name: Build all custom stream apps
-        run: mvn -pl stream-apps -am clean package -DskipTests=false
-        working-directory: .
+        run: mvn -f stream-apps/pom.xml clean package
 
       - name: Collect JAR artifacts
         id: collect
