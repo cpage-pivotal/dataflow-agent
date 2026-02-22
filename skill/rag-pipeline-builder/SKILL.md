@@ -1,3 +1,17 @@
+---
+name: rag-pipeline-builder
+description: >-
+  Build and deploy RAG ingestion pipelines on Spring Cloud Data Flow (SCDF) running on Cloud Foundry.
+  Orchestrates the full lifecycle: component selection from upstream and custom app catalogs,
+  credential provisioning via CredHub, app registration, stream creation, deployment with
+  service bindings, and status monitoring. Activate when the user describes a data pipeline
+  involving sources (S3, HTTP, JDBC, FTP), processors (text extraction, chunking, embedding),
+  and sinks (PgVector, JDBC, MongoDB), or requests pipeline management operations.
+metadata:
+  author: tanzu-dataflow
+  version: "1.0"
+---
+
 # RAG Pipeline Builder
 
 Build and deploy RAG (Retrieval-Augmented Generation) ingestion pipelines on Spring Cloud Data Flow (SCDF) running on Cloud Foundry. You orchestrate the full lifecycle: component selection, credential provisioning, app registration, stream creation, deployment, and status monitoring.
