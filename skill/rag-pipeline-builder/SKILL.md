@@ -81,58 +81,59 @@ Read `references/prebuilt-apps.md` to determine which credentials each component
 
 ### Step 4: Provision Credentials
 
-Spawn the `credential-provisioner` subagent to create CredHub service instances.
+Spawn a subagent to create CredHub service instances. Use natural language like:
 
-**Subagent instructions:**
-
-```
-You are a credential provisioner. Create CredHub service instances on Cloud Foundry for a RAG pipeline.
-
-Use the Cloud Foundry MCP server for all operations.
-
-Pipeline name: {pipeline_name}
-
-Create the following CredHub service instances:
-
-{for each component that needs credentials}
-Service instance: {pipeline_name}-{app_name}-creds
-Command: cf create-service credhub default {pipeline_name}-{app_name}-creds -c '{json_credentials}'
-
-{end for}
-
-After creating all service instances, verify each one exists by running `cf services`.
-
-Return the list of created service instance names.
-```
+> Use a subagent with only the cloud-foundry extension to provision credentials. Give it a 10-minute timeout.
+>
+> You are a credential provisioner. Create CredHub service instances on Cloud Foundry for a RAG pipeline called "{pipeline_name}".
+>
+> Create the following CredHub service instances:
+>
+> {for each component that needs credentials}
+> - `cf create-service credhub default {pipeline_name}-{app_name}-creds -c '{json_credentials}'`
+> {end for}
+>
+> After creating all service instances, verify each one exists by running `cf services`.
+> Return the list of created service instance names.
 
 Read `references/credhub-patterns.md` for the exact credential key names and JSON structure for each component type.
 
+**Subagent notes:**
+- Restrict to only the `cloud-foundry` extension — it doesn't need SCDF or GitHub access
+- The default 5-minute timeout is usually sufficient for credential provisioning
+- If the subagent times out or fails, you receive no output — retry by spawning a new subagent
+
 ### Step 5: Build Custom Apps (if needed)
 
-If the pipeline requires an agent-generated custom app (Step 2, category 3), spawn the `custom-app-builder` subagent.
+If the pipeline requires an agent-generated custom app (Step 2, category 3), spawn a subagent to generate, build, and publish it. This is a long-running task — request an extended timeout and higher turn limit:
 
-**Subagent instructions:**
+> Use a subagent with the github and developer extensions to build a custom stream app. Give it a 20-minute timeout and 100 turns.
+>
+> You are a custom stream app builder. Generate, build, and publish a Spring Cloud Stream application.
+>
+> Read the file `references/custom-app-scaffold.md` in the skill directory for code patterns and conventions.
+>
+> App requirements:
+> - Name: {app_name}
+> - Type: {source|processor|sink}
+> - Description: {what the app should do}
+> - Dependencies: {any specific libraries needed}
+>
+> Steps:
+> 1. Generate the complete Maven project (pom.xml, application class, configuration, application.properties, tests)
+> 2. Commit the code to `stream-apps-custom/{app_name}/` in the tanzu-dataflow repo using the GitHub MCP server
+> 3. Trigger the `build-custom-app.yml` workflow via workflow_dispatch with input app_name={app_name}
+> 4. Poll the workflow run until it completes (this takes several minutes — poll every 30 seconds)
+> 5. If the build fails, read the error logs, fix the code, recommit, and retrigger
+> 6. Once the build succeeds, get the JAR artifact URL from the GitHub Release
+> 7. Return the artifact URL
 
-```
-You are a custom stream app builder. Generate, build, and publish a Spring Cloud Stream application.
-
-Read the file `references/custom-app-scaffold.md` in the skill directory for code patterns and conventions.
-
-App requirements:
-- Name: {app_name}
-- Type: {source|processor|sink}
-- Description: {what the app should do}
-- Dependencies: {any specific libraries needed}
-
-Steps:
-1. Generate the complete Maven project (pom.xml, application class, configuration, application.properties, tests)
-2. Commit the code to `stream-apps-custom/{app_name}/` in the tanzu-dataflow repo using the GitHub MCP server
-3. Trigger the `build-custom-app.yml` workflow via workflow_dispatch with input app_name={app_name}
-4. Poll the workflow run until it completes
-5. If the build fails, read the error logs, fix the code, recommit, and retrigger
-6. Once the build succeeds, get the JAR artifact URL from the GitHub Release
-7. Return the artifact URL
-```
+**Subagent notes:**
+- Request **20-minute timeout** — GitHub Actions builds take 3-5 minutes, and the subagent may need to iterate on failures
+- Request **100 turns** — the default 25 may not be enough for generate → commit → trigger → poll → fix → retry cycles
+- Restrict to `github` and `developer` extensions — it doesn't need CF or SCDF access
+- Subagents cannot spawn their own subagents, so all work happens within this single subagent
+- If the subagent times out, you receive no output — check GitHub Actions manually and retry
 
 ### Step 6: Register Apps
 
@@ -301,10 +302,11 @@ deploy_stream(name="{pipeline_name}", properties="{json_properties}")
 
 ### Build Failures (Custom Apps)
 
-If the `custom-app-builder` subagent reports a build failure:
-1. Ask the subagent to read the build logs and fix the code
-2. The subagent will recommit and retrigger the build
-3. If it fails 3 times, report the error to the user and ask for guidance
+Build error recovery happens *inside* the subagent (it reads logs, fixes code, and retries). If the subagent itself fails:
+
+1. **Subagent returns a build failure**: The subagent exhausted its retries. Check the GitHub Actions logs manually using the GitHub MCP server (`list_workflow_runs`), report the error to the user, and ask for guidance.
+2. **Subagent times out (no output returned)**: The build took longer than the timeout. Use the GitHub MCP server to check the workflow run status. If the build succeeded, get the artifact URL from the release. If it failed or is still running, spawn a new subagent to continue.
+3. **Subagent exhausts turn limit**: Same as timeout — check GitHub Actions status and spawn a new subagent if needed.
 
 ### Deployment Failures
 
