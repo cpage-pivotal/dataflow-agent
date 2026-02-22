@@ -913,7 +913,7 @@ skills:
   - Fetches the upstream Spring Cloud Stream Applications 2025.0.1 RabbitMQ descriptor from Maven Central
   - Parses the properties file and registers each app with SCDF via the existing `registerApp` method
   - Metadata-only registration -- no JARs downloaded until stream deployment
-- [ ] Redeploy SCDF MCP server to Cloud Foundry with the new `bulk_register_apps` tool
+- [x] Redeploy SCDF MCP server to Cloud Foundry with the new `bulk_register_apps` tool
 - [x] Create `stream-apps/pom.xml` parent with shared dependency management: Spring Cloud 2025.0.1 BOM, Spring AI 1.1.2 BOM, Spring Cloud Stream + RabbitMQ binder
 - [x] Create `stream-apps/` submodules for custom RAG-specific components (not available upstream):
   - `text-extractor-processor` -- `Function<Message<byte[]>, Message<String>>` via Apache Tika 3.2.3
