@@ -934,15 +934,35 @@ skills:
 - Spring Cloud Stream's function model supports one-to-many via `Function<T, List<R>>` -- `text-chunker-processor` uses this to emit multiple chunk messages from a single input.
 - The `spring-ai-starter-model-openai` artifact (not `spring-ai-openai`) is the correct starter for Spring AI 1.1.2 auto-configuration.
 
-### Phase 3: Goose Skill + References
+### Phase 3: Goose Skill + References ✅
 
-- Author `skill/rag-pipeline-builder/SKILL.md` with workflow orchestration instructions
-- Author `references/prebuilt-apps.md` -- complete app catalog
-- Author `references/custom-app-scaffold.md` -- Spring Cloud Stream code patterns for model-based generation
-- Author `references/credhub-patterns.md` -- CredHub naming conventions and credential resolution
-- Author `references/scdf-deployment.md` -- deployer property reference
-- Include worked examples for common scenarios (S3 to PgVector, HTTP to PgVector)
-- Document subagent delegation patterns and error handling
+- [x] Author `skill/rag-pipeline-builder/SKILL.md` with workflow orchestration instructions (~250 lines)
+  - Sequential 10-step workflow: parse → identify → gather credentials → provision → build → register → create → deploy → verify → report
+  - Subagent delegation patterns for `credential-provisioner` and `custom-app-builder`
+  - Pipeline management operations: status, undeploy, redeploy, teardown, credential rotation
+  - Error handling for build failures, deployment failures, and credential errors
+  - Three worked examples: S3-to-PgVector, HTTP-to-PgVector, JDBC-to-Log
+- [x] Author `references/prebuilt-apps.md` -- complete app catalog
+  - Full upstream Spring Cloud Stream Applications 2025.0.1 catalog (sources, processors, sinks) with configuration properties
+  - Credential requirements per upstream app with exact CredHub key mappings
+  - All four custom RAG apps with registration names, function signatures, config properties, credential requirements, and artifact URL patterns
+- [x] Author `references/custom-app-scaffold.md` -- Spring Cloud Stream code patterns for model-based generation
+  - Complete Maven POM template with Spring Boot 3.5.10 + Spring Cloud 2025.0.1 (+ optional Spring AI 1.1.2)
+  - Function model patterns for Source (`Supplier`), Processor (`Function`), Processor fan-out (`Function<T, List<R>>`), and Sink (`Consumer`)
+  - CredHub credential bridging pattern (`@Value` + `@PostConstruct`)
+  - `application.properties` conventions, configuration properties records, test templates
+  - GitHub Actions build integration for `stream-apps-custom/` directory
+- [x] Author `references/credhub-patterns.md` -- CredHub naming conventions and credential resolution
+  - Naming convention: `{pipeline}-{app}-creds`
+  - Complete credential JSON templates for all upstream and custom apps
+  - End-to-end credential flow: CredHub → SCDF deployer property → `VCAP_SERVICES` → Spring Boot property flattening
+  - Credential lifecycle: create, update, delete, verify
+- [x] Author `references/scdf-deployment.md` -- deployer property reference
+  - Three property namespaces: `deployer.{app}.*`, `app.{app}.*`, wildcard `deployer.*.*`
+  - CF-specific deployer properties: services, memory, disk, instances, buildpack, health checks
+  - Common deployment patterns for each app type with example JSON
+  - Full deployment example for S3-to-PgVector pipeline
+  - Resource recommendations per app type
 
 ### Phase 4: Integration and Deployment
 
