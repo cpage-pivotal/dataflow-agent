@@ -51,14 +51,14 @@ Control Skipper behavior (rarely needed):
 |----------|-------------|
 | `spring.cloud.dataflow.skipper.platformName` | Target platform | 
 
-## CredHub Service Binding Pattern
+## Service Binding Pattern
 
-The most important deployer property for RAG pipelines. Binds a CredHub service instance to a specific app:
+The most important deployer property for RAG pipelines. Binds CF service instances to specific apps. Service instances can be any type — Postgres, GenAI, CredHub, or other platform services:
 
 ```json
 {
   "deployer.s3.cloudfoundry.services": "my-pipeline-s3-creds",
-  "deployer.pgvector-sink.cloudfoundry.services": "my-pipeline-pgvector-sink-creds"
+  "deployer.pgvector-sink.cloudfoundry.services": "my-postgres,my-pipeline-genai"
 }
 ```
 
@@ -66,7 +66,7 @@ Multiple services can be bound to a single app (comma-separated):
 
 ```json
 {
-  "deployer.pgvector-sink.cloudfoundry.services": "my-pipeline-pgvector-sink-creds,another-service"
+  "deployer.pgvector-sink.cloudfoundry.services": "my-postgres,my-pipeline-genai,extra-creds"
 }
 ```
 
@@ -132,6 +132,21 @@ Tika requires extra memory for parser libraries. 2048MB recommended.
 
 ### PgVector Sink Configuration
 
+**Preferred — using Postgres + GenAI service instances:**
+
+```json
+{
+  "deployer.pgvector-sink.cloudfoundry.services": "{postgres-instance},{pipeline}-genai",
+  "deployer.pgvector-sink.memory": "1024",
+  "app.pgvector-sink.pgvector.table": "vector_store",
+  "app.pgvector-sink.pgvector.dimensions": "1536",
+  "app.pgvector-sink.pgvector.index-type": "HNSW",
+  "app.pgvector-sink.pgvector.distance-type": "COSINE_DISTANCE"
+}
+```
+
+**Fallback — using CredHub:**
+
 ```json
 {
   "deployer.pgvector-sink.cloudfoundry.services": "{pipeline}-pgvector-sink-creds",
@@ -144,6 +159,20 @@ Tika requires extra memory for parser libraries. 2048MB recommended.
 ```
 
 ### Embedding Processor Configuration
+
+**Preferred — using GenAI service instance:**
+
+```json
+{
+  "deployer.embedding.cloudfoundry.services": "{pipeline}-genai",
+  "app.embedding.embedding.model": "mxbai-embed-large",
+  "app.embedding.embedding.dimensions": "1536"
+}
+```
+
+Use the GenAI service instance's `config_url` to discover the correct model name for the `embedding.model` property.
+
+**Fallback — using CredHub:**
 
 ```json
 {
@@ -164,9 +193,33 @@ Tika requires extra memory for parser libraries. 2048MB recommended.
 
 No credentials or service bindings needed. Useful for debugging pipelines.
 
-## Full Deployment Example
+## Full Deployment Examples
 
-S3-to-PgVector RAG pipeline:
+### S3-to-PgVector with Platform Services (preferred)
+
+Uses a Postgres service instance for the database and a GenAI service instance for embeddings:
+
+```json
+{
+  "deployer.s3.cloudfoundry.services": "legal-docs-rag-s3-creds",
+  "deployer.pgvector-sink.cloudfoundry.services": "legal-docs-postgres,legal-docs-rag-genai",
+
+  "app.s3.file.consumer.mode": "contents",
+  "app.s3.s3.remote-dir": "legal-docs",
+
+  "app.text-chunker.chunker.size": "1000",
+  "app.text-chunker.chunker.overlap": "200",
+
+  "app.pgvector-sink.pgvector.dimensions": "1536",
+
+  "deployer.text-extractor.memory": "2048",
+  "deployer.*.memory": "1024"
+}
+```
+
+### S3-to-PgVector with CredHub (fallback)
+
+Uses CredHub for all credentials when platform service instances aren't available:
 
 ```json
 {

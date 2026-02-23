@@ -1,17 +1,82 @@
-# CredHub Patterns
+# Credential Patterns
 
-This reference covers CredHub service instance naming conventions, credential JSON structures for each app type, and how credentials flow from CredHub to Spring Boot apps on Cloud Foundry.
+This reference covers how to provision and bind credentials for stream apps on Cloud Foundry, including platform service instances (preferred) and CredHub service instances (fallback).
 
 ## Overview
 
-Sensitive credentials (API keys, database passwords, AWS secrets) are stored in CredHub service instances on Cloud Foundry. They are bound to stream apps via SCDF deployer properties at deployment time. At runtime, each app reads its credentials from `VCAP_SERVICES`.
+Sensitive credentials (API keys, database passwords, AWS secrets) must never be passed as stream definition properties or environment variables. Instead, they are provided via **Cloud Foundry service bindings** that inject credentials into `VCAP_SERVICES` at runtime.
 
 **Never pass secrets as:**
 - Stream definition properties (`app.s3.aws.secret-key=...`)
 - Environment variables in deployment properties
 - Inline DSL parameters
 
-**Always use CredHub service bindings.**
+**Always use CF service bindings.**
+
+## Preferred: Platform Service Instances
+
+When available, prefer using Cloud Foundry **platform service instances** rather than CredHub for credentials. Platform services are managed by the platform and provide credentials automatically via `VCAP_SERVICES`.
+
+### Postgres Service Instance (for PgVector / JDBC)
+
+The preferred way to provide PostgreSQL database credentials is through a Postgres service instance in the CF space. When bound to an app, the Postgres service instance provides JDBC URL, username, and password automatically via `VCAP_SERVICES`.
+
+**Discover existing instances:**
+```
+cf services
+```
+
+**Bind to a stream app via SCDF deployer properties:**
+```
+deployer.pgvector-sink.cloudfoundry.services=my-postgres
+```
+
+No CredHub provisioning or credential bridging code is needed — Spring Boot reads `spring.datasource.*` properties from the Postgres service binding automatically.
+
+### GenAI Service Instance (for Embedding Models)
+
+The preferred way to get embedding model credentials is through a **GenAI on Tanzu Platform** service instance. GenAI provides an OpenAI-compatible API endpoint.
+
+**Discover available plans:**
+```
+cf marketplace -e genai
+```
+
+Plans with embedding capability will mention models like `mxbai-embed-large` or list `EMBEDDING` in their capabilities. Use the `config_url` endpoint (provided in the service binding credentials) to discover model names and capabilities:
+
+```
+curl -H "Authorization: Bearer $API_KEY" "$CONFIG_URL"
+```
+
+**Create a GenAI service instance:**
+```
+cf create-service genai {plan} {pipeline}-genai
+```
+
+**Bind to a stream app via SCDF deployer properties:**
+```
+deployer.pgvector-sink.cloudfoundry.services=my-postgres,my-pipeline-genai
+deployer.embedding.cloudfoundry.services=my-pipeline-genai
+```
+
+The GenAI service instance provides in `VCAP_SERVICES` under the `genai` label:
+- `endpoint.api_base` — OpenAI-compatible API base URL (append `/openai` for the full URL)
+- `endpoint.api_key` — Authentication token
+- `endpoint.config_url` — Discovery endpoint for available models and capabilities
+
+### Combining Platform Services
+
+An app can bind to multiple platform service instances. Comma-separate the names in the deployer property:
+
+```
+deployer.pgvector-sink.cloudfoundry.services=my-postgres,my-pipeline-genai
+```
+
+This is the preferred pattern for the `pgvector-sink`, which needs both a Postgres database and an embedding model.
+
+## Fallback: CredHub Service Instances
+
+When platform service instances aren't available (e.g., no Postgres or GenAI in the marketplace), use CredHub to store credentials manually.
 
 ## Naming Convention
 
@@ -121,7 +186,9 @@ These keys match Spring Boot DataSource auto-configuration. No bridging code nee
 }
 ```
 
-### Embedding Processor (custom RAG)
+### Embedding Processor (custom RAG — fallback when GenAI is not available)
+
+Only use CredHub for embedding credentials when a GenAI service instance is not available. Prefer binding a GenAI service instance instead.
 
 ```json
 {
@@ -131,7 +198,9 @@ These keys match Spring Boot DataSource auto-configuration. No bridging code nee
 
 The `CredHubEmbeddingConfig` class bridges `EMBEDDING_API_KEY` to `spring.ai.openai.api-key` via `@PostConstruct`.
 
-### PgVector Sink (custom RAG)
+### PgVector Sink (custom RAG — fallback when Postgres/GenAI are not available)
+
+Only use CredHub for PgVector credentials when Postgres and/or GenAI service instances are not available. Prefer binding platform service instances instead (see "Preferred: Platform Service Instances" above).
 
 ```json
 {

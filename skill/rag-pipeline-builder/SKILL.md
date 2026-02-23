@@ -8,7 +8,7 @@ description: >-
   involving sources (S3, HTTP, JDBC, FTP), processors (text extraction, chunking, embedding),
   and sinks (PgVector, JDBC, MongoDB), or requests pipeline management operations.
 metadata:
-  author: tanzu-dataflow
+  author: cpage-pivotal
   version: "1.0"
 ---
 
@@ -40,6 +40,25 @@ Also activate for pipeline management requests: status checks, undeployment, red
 
 Follow these steps in order. Communicate progress to the user at each stage.
 
+### Step 0: Identify the Cloud Foundry Environment
+
+The target platform is **Cloud Foundry**. Before doing anything else, ask the user to identify:
+- **CF org**: The Cloud Foundry organization they are working in
+- **CF space**: The Cloud Foundry space where the pipeline will be deployed
+
+Once identified, use the **Cloud Foundry MCP server** to target the org and space:
+
+```
+cf target -o {org} -s {space}
+```
+
+This is critical because:
+- Service instances (Postgres, GenAI, CredHub) are scoped to a space
+- SCDF deploys stream apps into the targeted space
+- The agent needs to discover existing service instances in the space (Step 3)
+
+If the user has already specified an org/space, acknowledge it and target it. If not, ask before proceeding.
+
 ### Step 1: Parse the Request
 
 Extract from the user's description:
@@ -70,17 +89,72 @@ Present the component plan to the user and confirm before proceeding.
 
 **Important design note**: The `pgvector-sink` handles embedding generation internally via Spring AI's VectorStore. A typical RAG pipeline is: `source | text-extractor | text-chunker | pgvector-sink`. You do NOT need a separate `embedding` processor in this path. The `embedding` processor is only needed when you want to decouple embedding generation from storage (e.g., branching pipelines, multi-sink, or embedding inspection).
 
-### Step 3: Gather Credentials
+### Step 3: Gather Credentials and Identify Service Instances
 
-Read `references/prebuilt-apps.md` to determine which credentials each component requires. Then ask the user for the needed credentials.
+Read `references/prebuilt-apps.md` to determine which credentials each component requires.
+
+**Preferred approach — use Cloud Foundry service instances whenever possible.** Before asking the user for raw credentials, check the CF space for existing service instances that can provide them:
+
+#### PgVector Database — Prefer a Postgres Service Instance
+
+The preferred way to connect to a PgVector database is through a **Postgres service instance** already provisioned in the CF space. Use the **Cloud Foundry MCP server** to list available services:
+
+```
+cf services
+```
+
+Look for a Postgres service instance (e.g., from the `postgres` or `postgresql` service offering). If one exists, ask the user if they want to use it. The Postgres service instance provides JDBC URL, username, and password automatically via `VCAP_SERVICES` when bound to the app — no manual credential entry needed.
+
+If no Postgres service instance exists, ask the user to create one or provide credentials manually via CredHub (see `references/credhub-patterns.md`).
+
+#### Embedding Model — Prefer a GenAI Service Instance
+
+The preferred way to get embedding model credentials is through a **GenAI on Tanzu Platform** service instance. Check the CF marketplace and space:
+
+```
+cf marketplace -e genai
+cf services
+```
+
+If GenAI plans are available, help the user select a plan that includes an embedding-capable model (look for plans with `EMBEDDING` capability or `mxbai-embed-large` in the description). Then create a service instance:
+
+```
+cf create-service genai {plan} {pipeline}-genai
+```
+
+The GenAI service instance provides:
+- `api_base` — The OpenAI-compatible API base URL
+- `api_key` — The authentication token
+- `config_url` — A discovery endpoint listing available models and their capabilities
+
+When bound to an app, these credentials are available in `VCAP_SERVICES` under the `genai` label. The app can use the `api_base + /openai` as the base URL and `api_key` as the API key with Spring AI's OpenAI-compatible client.
+
+If GenAI is not available in the marketplace, fall back to asking the user for an OpenAI API key (provisioned via CredHub).
+
+#### Other Credentials
+
+For all other components (S3, JDBC, FTP, etc.), ask the user for credentials as before — these are provisioned via CredHub service instances.
 
 **Rules:**
 - Only ask for credentials that are actually needed by the selected components
 - Group credential requests by component so the user understands what each is for
 - Never echo back sensitive values (passwords, API keys, secret keys) — confirm receipt without repeating them
 - If the user has already provided credentials in their initial message, acknowledge them
+- Always check for existing CF service instances before asking for raw credentials
 
-**Example prompt:**
+**Example prompt (when Postgres and GenAI service instances exist):**
+
+> I found the following service instances in your space:
+>
+> - `my-postgres` (Postgres) — I'll bind this to the PgVector sink for database access
+> - `my-genai` (GenAI) — I'll bind this to the PgVector sink for embedding generation
+>
+> **For the S3 source, I'll need:**
+> - AWS Access Key ID
+> - AWS Secret Access Key
+> - AWS Region
+
+**Example prompt (when no platform services exist):**
 
 > To set up your pipeline, I'll need the following credentials:
 >
@@ -97,7 +171,29 @@ Read `references/prebuilt-apps.md` to determine which credentials each component
 
 ### Step 4: Provision Credentials
 
-Spawn a subagent to create CredHub service instances. Use natural language like:
+This step provisions the credentials identified in Step 3. There are two paths depending on the credential source:
+
+#### Path A: Platform Service Instances (Postgres, GenAI)
+
+If using a **Postgres service instance** for the PgVector database, no CredHub provisioning is needed for database credentials — the Postgres service instance is bound directly to the app via SCDF deployer properties.
+
+If using a **GenAI service instance** for embeddings, no CredHub provisioning is needed for the embedding API key — the GenAI service instance is bound directly to the app via SCDF deployer properties.
+
+If the GenAI service instance doesn't exist yet, create it now:
+
+```
+cf create-service genai {plan} {pipeline}-genai
+```
+
+Wait for the service instance to be ready:
+
+```
+cf service {pipeline}-genai
+```
+
+#### Path B: CredHub Service Instances (everything else)
+
+For credentials that aren't provided by platform service instances (e.g., AWS keys, external database passwords, API keys for providers not on GenAI), spawn a subagent to create CredHub service instances:
 
 > Use a subagent with only the cloud-foundry extension to provision credentials. Give it a 10-minute timeout.
 >
@@ -105,7 +201,7 @@ Spawn a subagent to create CredHub service instances. Use natural language like:
 >
 > Create the following CredHub service instances:
 >
-> {for each component that needs credentials}
+> {for each component that needs CredHub credentials}
 > - `cf create-service credhub default {pipeline_name}-{app_name}-creds -c '{json_credentials}'`
 > {end for}
 >
@@ -113,6 +209,13 @@ Spawn a subagent to create CredHub service instances. Use natural language like:
 > Return the list of created service instance names.
 
 Read `references/credhub-patterns.md` for the exact credential key names and JSON structure for each component type.
+
+#### Summary
+
+After this step, you should have a list of all service instances to bind at deployment time. This may include a mix of:
+- Postgres service instance (for PgVector database)
+- GenAI service instance (for embedding model)
+- CredHub service instances (for AWS keys, other external credentials)
 
 **Subagent notes:**
 - Restrict to only the `cloud-foundry` extension — it doesn't need SCDF or GitHub access
@@ -137,7 +240,7 @@ If the pipeline requires an agent-generated custom app (Step 2, category 3), spa
 >
 > Steps:
 > 1. Generate the complete Maven project (pom.xml, application class, configuration, application.properties, tests)
-> 2. Commit the code to `stream-apps-custom/{app_name}/` in the tanzu-dataflow repo using the GitHub MCP server
+> 2. Commit the code to `stream-apps-custom/{app_name}/` in the `cpage-pivotal/dataflow-agent` repo using the GitHub MCP server
 > 3. Trigger the `build-custom-app.yml` workflow via workflow_dispatch with input app_name={app_name}
 > 4. Poll the workflow run until it completes (this takes several minutes — poll every 30 seconds)
 > 5. If the build fails, read the error logs, fix the code, recommit, and retrigger
@@ -160,14 +263,15 @@ Use the **SCDF MCP server** to register all required apps.
    bulk_register_apps()
    ```
 
-2. **Register custom RAG apps** — Use the latest GitHub Release URLs. Check `references/prebuilt-apps.md` for the artifact URL pattern:
+2. **Register custom RAG apps** — These are pre-built JARs on GitHub Releases. Register whichever ones the pipeline needs:
    ```
-   register_app(name="text-extractor", type="processor", uri="https://github.com/.../text-extractor-processor-1.0.0.jar")
-   register_app(name="text-chunker", type="processor", uri="https://github.com/.../text-chunker-processor-1.0.0.jar")
-   register_app(name="pgvector-sink", type="sink", uri="https://github.com/.../pgvector-sink-1.0.0.jar")
+   register_app(name="text-extractor", type="processor", uri="https://github.com/cpage-pivotal/dataflow-agent/releases/download/stream-apps-v2/text-extractor-processor-1.0.0.jar")
+   register_app(name="text-chunker", type="processor", uri="https://github.com/cpage-pivotal/dataflow-agent/releases/download/stream-apps-v2/text-chunker-processor-1.0.0.jar")
+   register_app(name="embedding", type="processor", uri="https://github.com/cpage-pivotal/dataflow-agent/releases/download/stream-apps-v2/embedding-processor-1.0.0.jar")
+   register_app(name="pgvector-sink", type="sink", uri="https://github.com/cpage-pivotal/dataflow-agent/releases/download/stream-apps-v2/pgvector-sink-1.0.0.jar")
    ```
 
-   To find the latest release URLs, use the GitHub MCP server: `list_releases(owner="...", repo="tanzu-dataflow")` and look for the most recent `stream-apps-v*` release.
+   To check for newer releases, use the GitHub MCP server: `list_releases(owner="cpage-pivotal", repo="dataflow-agent")` and look for the most recent `stream-apps-v*` tag.
 
 3. **Register agent-generated custom apps** (if any):
    ```
@@ -219,9 +323,17 @@ Build the deployment properties JSON object:
 
 ```json
 {
-  "deployer.{app}.cloudfoundry.services": "{pipeline}-{app}-creds",
+  "deployer.{app}.cloudfoundry.services": "{service-instance-name}",
   "app.{app}.{property}": "{value}",
   "deployer.*.memory": "1024"
+}
+```
+
+**Service bindings can include any CF service instance** — not just CredHub. For apps that need multiple services (e.g., pgvector-sink needs both a Postgres instance and a GenAI instance), comma-separate the service names:
+
+```json
+{
+  "deployer.pgvector-sink.cloudfoundry.services": "my-postgres,my-pipeline-genai"
 }
 ```
 
@@ -229,7 +341,7 @@ Build the deployment properties JSON object:
 
 | Property Pattern | Purpose | Example |
 |---|---|---|
-| `deployer.{app}.cloudfoundry.services` | Bind CredHub service instances | `deployer.s3.cloudfoundry.services=my-pipeline-s3-creds` |
+| `deployer.{app}.cloudfoundry.services` | Bind CF service instances (Postgres, GenAI, CredHub, etc.) | `deployer.pgvector-sink.cloudfoundry.services=my-postgres,my-genai` |
 | `app.{app}.{property}` | App-specific configuration | `app.s3.s3.remote-dir=my-bucket` |
 | `deployer.*.memory` | Memory for all apps | `deployer.*.memory=1024` |
 | `deployer.{app}.memory` | Memory for a specific app | `deployer.pgvector-sink.memory=2048` |
@@ -355,9 +467,14 @@ If an app fails with credential-related errors (connection refused, authenticati
 
 ## Worked Examples
 
-### Example 1: S3 to PgVector RAG Pipeline
+### Example 1: S3 to PgVector RAG Pipeline (with Platform Services)
 
-**User**: "Monitor my S3 bucket 'legal-docs' in us-west-2 for new PDF files, extract text, chunk it, and store in PgVector."
+**User**: "I'm in the `data-team` org, `dev` space. Monitor my S3 bucket 'legal-docs' in us-west-2 for new PDF files, extract text, chunk it, and store in PgVector."
+
+**Step 0 — Target CF environment**:
+```
+cf target -o data-team -s dev
+```
 
 **Component plan**:
 - Source: `s3` (upstream)
@@ -365,9 +482,22 @@ If an app fails with credential-related errors (connection refused, authenticati
 - Processor: `text-chunker` (custom RAG)
 - Sink: `pgvector-sink` (custom RAG)
 
-**Credentials needed**:
+**Step 3 — Discover service instances**:
+Agent runs `cf services` and finds:
+- `legal-docs-postgres` (Postgres service instance) — use for PgVector database
+
+Agent runs `cf marketplace -e genai` and finds plans with embedding capability. Creates:
+```
+cf create-service genai mxbai-embed-large legal-docs-rag-genai
+```
+
+**Credentials needed via CredHub** (only what platform services don't cover):
 - S3: AWS access key, secret key, region
-- PgVector sink: PostgreSQL URL, username, password, OpenAI API key
+
+**Service instances to bind**:
+- `legal-docs-rag-s3-creds` (CredHub — AWS credentials)
+- `legal-docs-postgres` (Postgres — database access)
+- `legal-docs-rag-genai` (GenAI — embedding model)
 
 **Stream definition**:
 ```
@@ -378,7 +508,7 @@ s3 | text-extractor | text-chunker | pgvector-sink
 ```json
 {
   "deployer.s3.cloudfoundry.services": "legal-docs-rag-s3-creds",
-  "deployer.pgvector-sink.cloudfoundry.services": "legal-docs-rag-pgvector-sink-creds",
+  "deployer.pgvector-sink.cloudfoundry.services": "legal-docs-postgres,legal-docs-rag-genai",
   "app.s3.file.consumer.mode": "contents",
   "app.s3.s3.remote-dir": "legal-docs",
   "app.s3.s3.region": "us-west-2",
@@ -389,17 +519,27 @@ s3 | text-extractor | text-chunker | pgvector-sink
 }
 ```
 
-### Example 2: HTTP to PgVector RAG Pipeline
+### Example 2: HTTP to PgVector RAG Pipeline (with Platform Services)
 
-**User**: "I want to POST documents to an HTTP endpoint and store them as embeddings in PgVector."
+**User**: "I want to POST documents to an HTTP endpoint and store them as embeddings in PgVector. I'm in org `acme` space `staging`."
+
+**Step 0 — Target CF environment**:
+```
+cf target -o acme -s staging
+```
 
 **Component plan**:
 - Source: `http` (upstream)
 - Processor: `text-chunker` (custom RAG) — optional, depends on document size
 - Sink: `pgvector-sink` (custom RAG)
 
-**Credentials needed**:
-- PgVector sink: PostgreSQL URL, username, password, OpenAI API key
+**Step 3 — Discover service instances**:
+Agent finds `staging-postgres` (Postgres) and GenAI in the marketplace. Creates:
+```
+cf create-service genai mxbai-embed-large http-rag-genai
+```
+
+**Credentials needed via CredHub**: None — all credentials come from platform services.
 
 **Stream definition**:
 ```
@@ -409,13 +549,35 @@ http | text-chunker | pgvector-sink
 **Deployment properties**:
 ```json
 {
-  "deployer.pgvector-sink.cloudfoundry.services": "http-rag-pgvector-sink-creds",
+  "deployer.pgvector-sink.cloudfoundry.services": "staging-postgres,http-rag-genai",
   "app.http.server.port": "8080",
   "deployer.*.memory": "1024"
 }
 ```
 
-### Example 3: JDBC Source to Log Sink (Debugging)
+### Example 3: S3 to PgVector (CredHub Fallback — No Platform Services)
+
+**User**: "Monitor S3 for PDFs and store in PgVector. I don't have Postgres or GenAI service instances."
+
+This example shows the fallback when platform service instances aren't available — all credentials go through CredHub.
+
+**Credentials needed via CredHub**:
+- S3: AWS access key, secret key, region
+- PgVector sink: PostgreSQL URL, username, password, OpenAI API key
+
+**Deployment properties**:
+```json
+{
+  "deployer.s3.cloudfoundry.services": "my-pipeline-s3-creds",
+  "deployer.pgvector-sink.cloudfoundry.services": "my-pipeline-pgvector-sink-creds",
+  "app.s3.file.consumer.mode": "contents",
+  "app.s3.s3.remote-dir": "my-bucket",
+  "deployer.text-extractor.memory": "2048",
+  "deployer.*.memory": "1024"
+}
+```
+
+### Example 4: JDBC Source to Log Sink (Debugging)
 
 **User**: "Poll my PostgreSQL table 'events' every 10 seconds and log the results."
 
@@ -424,17 +586,17 @@ http | text-chunker | pgvector-sink
 - Sink: `log` (upstream)
 
 **Credentials needed**:
-- JDBC: PostgreSQL URL, username, password
+- JDBC: PostgreSQL URL, username, password (via CredHub or a Postgres service instance)
 
 **Stream definition**:
 ```
 jdbc | log
 ```
 
-**Deployment properties**:
+**Deployment properties** (using a Postgres service instance):
 ```json
 {
-  "deployer.jdbc.cloudfoundry.services": "events-monitor-jdbc-creds",
+  "deployer.jdbc.cloudfoundry.services": "my-postgres",
   "app.jdbc.jdbc.supplier.query": "SELECT * FROM events WHERE processed = false",
   "app.jdbc.trigger.fixed-delay": "10000",
   "deployer.*.memory": "1024"

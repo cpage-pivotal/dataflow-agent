@@ -91,19 +91,25 @@ Upstream apps use standard Spring Boot externalized configuration. When CredHub 
 
 ## Custom RAG Apps
 
-Built in the `stream-apps/` directory of the tanzu-dataflow repo. Published as JAR artifacts on GitHub Releases.
+Built in the `stream-apps/` directory and published as JAR artifacts on GitHub Releases for the `cpage-pivotal/dataflow-agent` repository.
 
-**Artifact URL pattern:**
+**These apps are NOT in the upstream catalog.** They must be registered individually via `register_app` using the artifact URLs below before they can be used in stream definitions.
+
+### Registration Commands
+
+Register all four custom RAG apps with these exact calls:
+
 ```
-https://github.com/{owner}/tanzu-dataflow/releases/download/stream-apps-v{build_number}/{app_name}-{version}.jar
+register_app(name="text-extractor", type="processor", uri="https://github.com/cpage-pivotal/dataflow-agent/releases/download/stream-apps-v2/text-extractor-processor-1.0.0.jar")
+register_app(name="text-chunker", type="processor", uri="https://github.com/cpage-pivotal/dataflow-agent/releases/download/stream-apps-v2/text-chunker-processor-1.0.0.jar")
+register_app(name="embedding", type="processor", uri="https://github.com/cpage-pivotal/dataflow-agent/releases/download/stream-apps-v2/embedding-processor-1.0.0.jar")
+register_app(name="pgvector-sink", type="sink", uri="https://github.com/cpage-pivotal/dataflow-agent/releases/download/stream-apps-v2/pgvector-sink-1.0.0.jar")
 ```
 
-To find the latest release URLs, use the GitHub MCP server:
+To check for newer releases, use the GitHub MCP server:
 ```
-list_releases(owner="{owner}", repo="tanzu-dataflow")
+list_releases(owner="cpage-pivotal", repo="dataflow-agent")
 ```
-
-Look for the most recent release tagged `stream-apps-v*`.
 
 ### text-extractor (processor)
 
@@ -115,7 +121,7 @@ Extracts text content from binary documents (PDF, DOCX, plain text) using Apache
 | **SCDF type** | `processor` |
 | **Function signature** | `Function<Message<byte[]>, Message<String>>` |
 | **Function bean name** | `extractText` |
-| **Artifact name** | `text-extractor-processor-1.0.0.jar` |
+| **Artifact URL** | `https://github.com/cpage-pivotal/dataflow-agent/releases/download/stream-apps-v2/text-extractor-processor-1.0.0.jar` |
 
 **Configuration properties (non-sensitive, set via `app.text-extractor.*`):**
 
@@ -141,7 +147,7 @@ Splits text into overlapping chunks suitable for embedding and vector storage.
 | **SCDF type** | `processor` |
 | **Function signature** | `Function<Message<String>, List<Message<String>>>` (one-to-many) |
 | **Function bean name** | `chunkText` |
-| **Artifact name** | `text-chunker-processor-1.0.0.jar` |
+| **Artifact URL** | `https://github.com/cpage-pivotal/dataflow-agent/releases/download/stream-apps-v2/text-chunker-processor-1.0.0.jar` |
 
 **Configuration properties (non-sensitive, set via `app.text-chunker.*`):**
 
@@ -159,7 +165,7 @@ Splits text into overlapping chunks suitable for embedding and vector storage.
 
 ### embedding (processor)
 
-Calls an embedding API (OpenAI by default) to convert text into vector embeddings. Uses Spring AI's `EmbeddingModel` abstraction.
+Calls an embedding API (OpenAI-compatible by default) to convert text into vector embeddings. Uses Spring AI's `EmbeddingModel` abstraction.
 
 | Field | Value |
 |-------|-------|
@@ -167,7 +173,7 @@ Calls an embedding API (OpenAI by default) to convert text into vector embedding
 | **SCDF type** | `processor` |
 | **Function signature** | `Function<Message<String>, Message<float[]>>` |
 | **Function bean name** | `generateEmbedding` |
-| **Artifact name** | `embedding-processor-1.0.0.jar` |
+| **Artifact URL** | `https://github.com/cpage-pivotal/dataflow-agent/releases/download/stream-apps-v2/embedding-processor-1.0.0.jar` |
 
 **Configuration properties (non-sensitive, set via `app.embedding.*`):**
 
@@ -176,7 +182,29 @@ Calls an embedding API (OpenAI by default) to convert text into vector embedding
 | `embedding.model` | `text-embedding-3-small` | Embedding model name |
 | `embedding.dimensions` | `1536` | Output vector dimensions |
 
-**Credentials (sensitive, via CredHub):**
+**Credentials — preferred: GenAI on Tanzu Platform service instance:**
+
+The preferred way to provide embedding credentials is through a **GenAI service instance** in the CF space. The GenAI service provides an OpenAI-compatible API endpoint and API key. Bind it to the app via SCDF deployer properties:
+
+```
+deployer.embedding.cloudfoundry.services={pipeline}-genai
+```
+
+The GenAI service instance provides `api_base` and `api_key` in `VCAP_SERVICES` under the `genai` label. The app reads these to configure Spring AI's OpenAI-compatible embedding client.
+
+To discover available GenAI plans with embedding capability:
+```
+cf marketplace -e genai
+```
+
+Look for plans that include an embedding model (e.g., `mxbai-embed-large`). Create the service instance:
+```
+cf create-service genai {plan} {pipeline}-genai
+```
+
+**Credentials — fallback: CredHub:**
+
+If GenAI is not available, provision an API key via CredHub:
 
 | CredHub Key | Description |
 |-------------|-------------|
@@ -198,7 +226,7 @@ Writes text documents to PostgreSQL with the PgVector extension. Uses Spring AI'
 | **SCDF type** | `sink` |
 | **Function signature** | `Consumer<Message<String>>` |
 | **Function bean name** | `writeToVectorStore` |
-| **Artifact name** | `pgvector-sink-1.0.0.jar` |
+| **Artifact URL** | `https://github.com/cpage-pivotal/dataflow-agent/releases/download/stream-apps-v2/pgvector-sink-1.0.0.jar` |
 
 **Configuration properties (non-sensitive, set via `app.pgvector-sink.*`):**
 
@@ -209,7 +237,31 @@ Writes text documents to PostgreSQL with the PgVector extension. Uses Spring AI'
 | `pgvector.index-type` | `HNSW` | Index type: `HNSW`, `IVFFLAT`, `NONE` |
 | `pgvector.distance-type` | `COSINE_DISTANCE` | Distance metric: `COSINE_DISTANCE`, `EUCLIDEAN_DISTANCE` |
 
-**Credentials (sensitive, via CredHub):**
+**Credentials — preferred approach: Postgres + GenAI service instances:**
+
+The pgvector-sink needs two things: a PostgreSQL database and an embedding model. The preferred approach uses Cloud Foundry platform service instances for both:
+
+1. **Postgres service instance** — Provides JDBC URL, username, and password automatically via `VCAP_SERVICES`. Look for an existing Postgres service instance in the CF space (`cf services`). The Postgres service binding provides `spring.datasource.*` properties automatically, so no CredHub provisioning or bridging code is needed for database credentials.
+
+2. **GenAI service instance** — Provides an OpenAI-compatible embedding API endpoint and key via `VCAP_SERVICES`. Create one if it doesn't exist:
+   ```
+   cf create-service genai {embedding-plan} {pipeline}-genai
+   ```
+
+Bind both to the pgvector-sink via SCDF deployer properties (comma-separated):
+
+```
+deployer.pgvector-sink.cloudfoundry.services={postgres-instance},{genai-instance}
+```
+
+Example:
+```
+deployer.pgvector-sink.cloudfoundry.services=my-postgres,legal-docs-rag-genai
+```
+
+**Credentials — fallback: CredHub (when platform services aren't available):**
+
+If Postgres and/or GenAI service instances aren't available, provision credentials manually via CredHub:
 
 | CredHub Key | Description |
 |-------------|-------------|

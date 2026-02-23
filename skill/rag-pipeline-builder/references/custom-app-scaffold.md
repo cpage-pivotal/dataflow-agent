@@ -424,5 +424,5 @@ Custom apps are committed to `stream-apps-custom/{app-name}/` and built via the 
 
 The artifact URL follows the pattern:
 ```
-https://github.com/{owner}/tanzu-dataflow/releases/download/custom-{app-name}-v{version}/{app-name}-{version}.jar
+https://github.com/cpage-pivotal/dataflow-agent/releases/download/custom-{app-name}-v{version}/{app-name}-{version}.jar
 ```
