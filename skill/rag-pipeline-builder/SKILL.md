@@ -54,7 +54,7 @@ Read `references/prebuilt-apps.md` to determine which apps are available.
 
 For each pipeline component, classify it:
 
-1. **Upstream app** — Available in the Spring Cloud Stream Applications 2025.0.1 catalog (S3, HTTP, JDBC, FTP, SFTP, MongoDB, MQTT, mail, log, filter, transform, splitter, etc.). These are pre-built and just need registration via `bulk_register_apps`.
+1. **Upstream app** — Available in the Spring Cloud Stream Applications 2025.0.1 catalog. These are pre-built and just need registration via `bulk_register_apps`.
 
 2. **Custom RAG app** — One of the four pre-built custom apps in this project:
    - `text-extractor` (processor) — Extracts text from PDF/DOCX/TXT via Apache Tika
@@ -65,6 +65,8 @@ For each pipeline component, classify it:
 3. **Agent-generated custom app** — A component that doesn't exist anywhere. You will generate the code, build it, and register it. This requires spawning the `custom-app-builder` subagent.
 
 Present the component plan to the user and confirm before proceeding.
+
+**CRITICAL — Use exact SCDF registration names.** Upstream apps are registered with **short names only** — no type suffix. The HTTP source is `http`, NOT `http-source`. The S3 source is `s3`, NOT `s3-source`. The JDBC sink is `jdbc`, NOT `jdbc-sink`. The log sink is `log`, NOT `log-sink`. SCDF resolves the type from registration metadata. You MUST use the exact names listed in `references/prebuilt-apps.md` in stream definitions. Getting a name wrong causes `create_stream` to fail.
 
 **Important design note**: The `pgvector-sink` handles embedding generation internally via Spring AI's VectorStore. A typical RAG pipeline is: `source | text-extractor | text-chunker | pgvector-sink`. You do NOT need a separate `embedding` processor in this path. The `embedding` processor is only needed when you want to decouple embedding generation from storage (e.g., branching pipelines, multi-sink, or embedding inspection).
 
@@ -186,7 +188,18 @@ create_stream(
 )
 ```
 
-**App names in the DSL** must match the registered app names exactly. For upstream apps, the name is the short name (e.g., `s3`, `http`, `jdbc`). For custom RAG apps, use: `text-extractor`, `text-chunker`, `embedding`, `pgvector-sink`.
+**App names in the DSL** must match the exact registered names. Do NOT add type suffixes like `-source`, `-sink`, or `-processor` to upstream app names. Examples of correct vs. incorrect usage:
+
+| Correct | WRONG | Why |
+|---------|-------|-----|
+| `http` | `http-source` | Upstream sources have no `-source` suffix |
+| `s3` | `s3-source` | Same — short name only |
+| `jdbc` | `jdbc-sink` | Same — SCDF infers type from position in the pipeline |
+| `log` | `log-sink` | Same |
+| `text-extractor` | `text-extractor-processor` | Custom RAG apps use hyphenated names, not the Maven artifact name |
+| `pgvector-sink` | `pgvector` | Custom RAG apps include `-sink` in their registered name (this is the registered name, not a type suffix) |
+
+For custom RAG apps, use: `text-extractor`, `text-chunker`, `embedding`, `pgvector-sink`.
 
 **App properties in the DSL**: Non-sensitive configuration can be set inline using `--` syntax:
 

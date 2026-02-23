@@ -6,10 +6,12 @@ This reference lists all apps available for pipeline construction: upstream Spri
 
 Registered with SCDF via `bulk_register_apps()`. All use the RabbitMQ binder. JARs are hosted on Maven Central and downloaded by SCDF only at deployment time.
 
+**CRITICAL — SCDF registration names:** The names listed below are the **exact names** registered with SCDF. They are **short names** without type suffixes. For example, the HTTP source is registered as `http`, NOT `http-source`. The S3 source is `s3`, NOT `s3-source`. The JDBC sink is `jdbc`, NOT `jdbc-sink`. SCDF determines the type (source/processor/sink) from the registration metadata, not from the name. Always use the exact names from the tables below in stream definitions.
+
 ### Sources
 
-| App Name | Description | Key Configuration Properties |
-|----------|-------------|------------------------------|
+| SCDF Name | Description | Key Configuration Properties |
+|-----------|-------------|------------------------------|
 | `s3` | Polls an AWS S3 bucket for new files | `s3.remote-dir`, `s3.region`, `file.consumer.mode` (`contents`\|`ref`) |
 | `http` | Receives HTTP POST payloads | `server.port`, `http.path-pattern` |
 | `jdbc` | Polls a database table | `jdbc.supplier.query`, `trigger.fixed-delay`, `spring.datasource.*` |
@@ -19,24 +21,36 @@ Registered with SCDF via `bulk_register_apps()`. All use the RabbitMQ binder. JA
 | `mongodb` | Polls a MongoDB collection | `spring.data.mongodb.uri`, `mongodb.collection` |
 | `mqtt` | Subscribes to an MQTT topic | `mqtt.url`, `mqtt.topics`, `mqtt.username`, `mqtt.password` |
 | `mail` | Polls an email inbox (IMAP) | `mail.imap.host`, `mail.imap.username`, `mail.imap.password` |
-| `tcp-client` | Connects to a TCP server and receives data | `tcp.host`, `tcp.port` |
+| `tcp` | Receives data from a TCP connection | `tcp.host`, `tcp.port` |
 | `rabbit` | Consumes from a RabbitMQ queue | `rabbit.queues`, `spring.rabbitmq.*` |
+| `time` | Emits timestamps at a fixed interval | `trigger.fixed-delay` |
+| `debezium` | CDC events from databases via Debezium | `debezium.connector`, `debezium.properties.*` |
+| `syslog` | Receives syslog messages | `syslog.port` |
+| `load-generator` | Generates test load messages | `load-generator.message-size` |
+| `websocket` | Receives WebSocket messages | `websocket.path` |
+| `jms` | Consumes from a JMS queue | `jms.destination` |
+| `kafka` | Consumes from a Kafka topic | `kafka.topic` |
 
 ### Processors
 
-| App Name | Description | Key Configuration Properties |
-|----------|-------------|------------------------------|
+| SCDF Name | Description | Key Configuration Properties |
+|-----------|-------------|------------------------------|
 | `transform` | Applies SpEL expressions to transform payloads | `spel.function.expression` |
 | `filter` | Filters messages based on SpEL expressions | `filter.function.expression` |
 | `splitter` | Splits a single message into multiple | `splitter.expression`, `splitter.delimiters` |
 | `groovy` | Applies Groovy scripts to messages | `groovy.script`, `groovy.script-location` |
 | `http-request` | Makes HTTP requests and emits responses | `http.request.url-expression`, `http.request.http-method` |
 | `script` | Executes scripts (JS, Ruby, Python, Groovy) | `script.language`, `script.script` |
+| `aggregator` | Aggregates messages into groups | `aggregator.correlation`, `aggregator.release` |
+| `bridge` | Passes messages through unchanged | (none) |
+| `header-enricher` | Adds/modifies message headers | `header.enricher.headers.*` |
+| `image-recognition` | Classifies images via TensorFlow | `image.recognition.model*` |
+| `object-detection` | Detects objects in images via TensorFlow | `object.detection.model*` |
 
 ### Sinks
 
-| App Name | Description | Key Configuration Properties |
-|----------|-------------|------------------------------|
+| SCDF Name | Description | Key Configuration Properties |
+|-----------|-------------|------------------------------|
 | `jdbc` | Inserts payloads into a relational database | `jdbc.consumer.table-name`, `jdbc.consumer.columns` |
 | `log` | Logs message payloads (debugging) | `log.expression`, `log.level` |
 | `mongodb` | Writes to a MongoDB collection | `spring.data.mongodb.uri`, `mongodb.collection` |
@@ -45,6 +59,15 @@ Registered with SCDF via `bulk_register_apps()`. All use the RabbitMQ binder. JA
 | `file` | Writes to local files | `file.directory`, `file.name-expression` |
 | `rabbit` | Publishes to a RabbitMQ exchange | `rabbit.exchange`, `rabbit.routing-key-expression` |
 | `tcp` | Sends data to a TCP server | `tcp.host`, `tcp.port` |
+| `cassandra` | Writes to Apache Cassandra | `cassandra.keyspace`, `cassandra.table` |
+| `redis` | Writes to Redis | `redis.key`, `spring.redis.*` |
+| `mqtt` | Publishes to an MQTT topic | `mqtt.topic`, `mqtt.url` |
+| `ftp` | Writes to an FTP server | `ftp.host`, `ftp.remote-dir` |
+| `sftp` | Writes to an SFTP server | `sftp.host`, `sftp.remote-dir` |
+| `kafka` | Publishes to a Kafka topic | `kafka.topic` |
+| `pgcopy` | Bulk-copies data into PostgreSQL | `pgcopy.table-name`, `pgcopy.columns` |
+| `router` | Routes messages to named destinations | `router.expression` |
+| `websocket` | Sends via WebSocket | `websocket.path` |
 
 ### Upstream App Credential Requirements
 
