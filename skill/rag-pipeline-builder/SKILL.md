@@ -2,11 +2,12 @@
 name: rag-pipeline-builder
 description: >-
   Build and deploy RAG ingestion pipelines on Spring Cloud Data Flow (SCDF) running on Cloud Foundry.
-  Orchestrates the full lifecycle: component selection from upstream and custom app catalogs,
-  credential provisioning via CredHub, app registration, stream creation, deployment with
-  service bindings, and status monitoring. Activate when the user describes a data pipeline
-  involving sources (S3, HTTP, JDBC, FTP), processors (text extraction, chunking, embedding),
-  and sinks (PgVector, JDBC, MongoDB), or requests pipeline management operations.
+  Orchestrates the full lifecycle: CF org/space targeting, component selection from upstream and
+  custom app catalogs, credential provisioning via platform service instances (Postgres, GenAI)
+  and CredHub, app registration, stream creation, deployment with service bindings, and status
+  monitoring. Activate when the user describes a data pipeline involving sources (S3, HTTP, JDBC,
+  FTP), processors (text extraction, chunking, embedding), and sinks (PgVector, JDBC, MongoDB),
+  or requests pipeline management operations.
 metadata:
   author: cpage-pivotal
   version: "1.0"
@@ -379,7 +380,7 @@ Report the final status to the user with a summary of the deployed pipeline.
 Summarize the deployed pipeline:
 - Pipeline name and SCDF dashboard URL
 - Components and their roles
-- CredHub service instances created
+- Service instances bound (Postgres, GenAI, CredHub, etc.)
 - Any configuration properties set
 - How to check status, undeploy, or teardown
 
